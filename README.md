@@ -77,7 +77,7 @@ which shifts the burden onto every caller, every branch, every panic path.
 | [`BufferPool::put(buf)`] | Manual return for detached/raw buffers. |
 | [`BufferPool::with_reset(f)`] | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
 | [`BufferPool::with_max_idle(n)`] | Cap idle buffers; returns beyond the cap are dropped. |
-| [`BufferPool::stats()`] | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. |
+| [`BufferPool::stats()`] | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
 | `BufferPool: Clone` | Cheap shared-state handle (like `Arc`); guards keep the pool alive. |
 
 The pool never clears buffers on its own — accumulation buffers should use
@@ -101,6 +101,15 @@ runnable (`cargo run --release --example <name>`):
 | [`scoped_threads`] | No rayon: `std::thread::scope`, cloned handles, an initializer borrowing stack-local config, and a reset hook. |
 | [`alloc_bench`] | `fresh` vs `pooled` vs rayon `map_init` on 2 MiB buffers: wall time (best-of-N) plus allocation counts. |
 
+## Feature flags
+
+- **`stats`** (off by default): per-pool lease/allocation counters via
+  [`BufferPool::stats()`] — `leases`, `allocations`, and `reuses()`. Costs one
+  relaxed atomic add per lease; enable it to verify that recycling is
+  happening or to budget scratch memory. The crate's own tests and examples
+  enable it automatically via a dev-dependency on the crate itself, so
+  `cargo test` and `cargo run --example ...` need no extra flags.
+
 ## Design notes
 
 - **Why not `thread_local!`?** It is the classic alternative and the classic
@@ -121,9 +130,10 @@ runnable (`cargo run --release --example <name>`):
 - **Poisoning.** The lock never guards an invariant (just values), so a
   poisoned mutex is recovered via `PoisonError::into_inner` — no panic loops,
   no leaked idle buffers.
-- **Memory budgeting.** `stats().allocations` bounds concurrently outstanding
-  leases: budget scratch as `allocations × buffer_len × size_of::<T>()`.
-  `with_max_idle` keeps bursts from parking buffers forever.
+- **Memory budgeting.** With the `stats` feature, `stats().allocations` bounds
+  concurrently outstanding leases: budget scratch as
+  `allocations × buffer_len × size_of::<T>()`. `with_max_idle` keeps bursts
+  from parking buffers forever.
 - **Honest limits.** Recycled buffers carry stale contents (use `with_reset`);
   a recycled small hot buffer pays a cross-core cache-line transfer on its
   next use; tiny cheap buffers are better left to the allocator.

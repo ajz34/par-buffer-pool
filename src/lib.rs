@@ -198,6 +198,16 @@
 //!   leaked on non-`'static` data, awkward to reset between phases); a shared
 //!   pool sidesteps all of that.
 //!
+//! ## Feature flags
+//!
+//! - **`stats`** (off by default): per-pool lease/allocation counters,
+//!   exposed through `stats()` — `leases`, `allocations`, and `reuses()`.
+//!   Costs one relaxed atomic add per lease; enable it to verify that
+//!   recycling is happening or to budget scratch memory
+//!   (`allocations * len * size_of::<T>()` bytes). The crate's tests and
+//!   examples enable it automatically via a dev-dependency on the crate
+//!   itself.
+//!
 //! ## Design notes
 //!
 //! - **Locking.** One [`std::sync::Mutex`] guards a `Vec<T>`; the critical
@@ -209,11 +219,11 @@
 //!   poisoned mutex carries no damaged invariant; it is recovered from with
 //!   [`std::sync::PoisonError::into_inner`] rather than panicking or leaking
 //!   idle buffers.
-//! - **Memory growth.** [`BufferPool::stats`] reports how many leases were
-//!   served and how many buffers had to be allocated; `allocations` is an
-//!   upper bound on concurrently outstanding leases, which is the number to
-//!   multiply by buffer size when budgeting scratch memory (e.g.
-//!   `allocations * len * size_of::<T>()` bytes for `Vec`-like buffers).
+//! - **Memory growth.** With the `stats` feature (see "Feature flags"
+//!   above), `allocations` is an upper bound on concurrently outstanding
+//!   leases, which is the number to multiply by buffer size when budgeting
+//!   scratch memory (e.g. `allocations * len * size_of::<T>()` bytes for
+//!   `Vec`-like buffers).
 //! - **`Clone` handles.** [`BufferPool`] is a cheap handle around shared
 //!   state (like `Arc`): clone it into worker closures or store it in a driver
 //!   struct; guards keep the pool alive even if all handles are dropped.
@@ -225,6 +235,7 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+#[cfg(feature = "stats")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -232,6 +243,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 ///
 /// See [`BufferPool::stats`]. The difference `leases - allocations` is the
 /// number of leases served from recycled buffers.
+#[cfg(feature = "stats")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PoolStats {
     /// Total number of leases taken via [`BufferPool::get`].
@@ -245,6 +257,7 @@ pub struct PoolStats {
     pub allocations: usize,
 }
 
+#[cfg(feature = "stats")]
 impl PoolStats {
     /// Leases served from an idle (recycled) buffer: `leases - allocations`.
     pub fn reuses(&self) -> usize {
@@ -294,7 +307,9 @@ struct PoolInner<'a, T> {
     init: InitFn<'a, T>,
     reset: Option<ResetFn<'a, T>>,
     max_idle: usize,
+    #[cfg(feature = "stats")]
     leases: AtomicUsize,
+    #[cfg(feature = "stats")]
     allocations: AtomicUsize,
 }
 
@@ -323,7 +338,9 @@ impl<'a, T> BufferPool<'a, T> {
                 init: Box::new(init),
                 reset: None,
                 max_idle: usize::MAX,
+                #[cfg(feature = "stats")]
                 leases: AtomicUsize::new(0),
+                #[cfg(feature = "stats")]
                 allocations: AtomicUsize::new(0),
             }),
         }
@@ -378,10 +395,12 @@ impl<'a, T> BufferPool<'a, T> {
     /// assert_eq!(&*greeting, "hello");
     /// ```
     pub fn get(&self) -> Pooled<'a, T> {
+        #[cfg(feature = "stats")]
         self.inner.leases.fetch_add(1, Ordering::Relaxed);
         // Pop under the lock, but run the initializer outside it: allocation
         // can take arbitrarily long and must not stall other leases.
         let buffer = self.inner.lock_idle().pop().unwrap_or_else(|| {
+            #[cfg(feature = "stats")]
             self.inner.allocations.fetch_add(1, Ordering::Relaxed);
             (self.inner.init)()
         });
@@ -409,6 +428,8 @@ impl<'a, T> BufferPool<'a, T> {
 
     /// Lease and allocation counters; see [`PoolStats`].
     ///
+    /// Only available with the `stats` feature (off by default).
+    ///
     /// # Example
     ///
     /// ```
@@ -424,6 +445,7 @@ impl<'a, T> BufferPool<'a, T> {
     /// assert_eq!(stats.allocations, 1); // one buffer served all ten leases
     /// assert_eq!(stats.reuses(), 9);
     /// ```
+    #[cfg(feature = "stats")]
     pub fn stats(&self) -> PoolStats {
         PoolStats {
             leases: self.inner.leases.load(Ordering::Relaxed),
@@ -469,11 +491,20 @@ impl<'a, T> Clone for BufferPool<'a, T> {
 
 impl<'a, T> fmt::Debug for BufferPool<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BufferPool")
-            .field("idle", &self.idle_len())
-            .field("max_idle", &self.inner.max_idle)
-            .field("stats", &self.stats())
-            .finish_non_exhaustive()
+        // `field` takes `&mut self` and returns `&mut DebugStruct`, so the
+        // builder must be bound before the (feature-gated) `field` calls;
+        // borrowed values are bound first to keep temporaries alive.
+        let idle = self.idle_len();
+        let mut debug = f.debug_struct("BufferPool");
+        debug
+            .field("idle", &idle)
+            .field("max_idle", &self.inner.max_idle);
+        #[cfg(feature = "stats")]
+        {
+            let stats = self.stats();
+            debug.field("stats", &stats);
+        }
+        debug.finish_non_exhaustive()
     }
 }
 

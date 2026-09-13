@@ -10,10 +10,19 @@ keywords = ["pool", "buffer", "scratch", "rayon", "reuse"]
 categories = ["concurrency", "memory-management", "rust-patterns"]
 # there are intentionally no runtime dependencies
 
+[features]
+# Off by default: per-pool lease/allocation counters exposed via `stats()`.
+# One relaxed atomic add per lease; enable to verify recycling behavior or
+# to budget scratch memory.
+stats = []
+
 [dependencies]
 
 [dev-dependencies]
 rayon = "1.8"
+# Enable `stats` for tests, examples, and doc tests without forcing it on
+# downstream users of the library itself.
+par-buffer-pool = { path = ".", features = ["stats"] }
 
 [[example]]
 name = "rayon_scratch"
