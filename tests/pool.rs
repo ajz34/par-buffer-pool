@@ -197,7 +197,7 @@ fn rayon_stress_allocates_at_most_one_buffer_per_thread() {
 #[test]
 fn non_static_initializer_with_scoped_threads() {
     // The initializer borrows `dims` (a stack local, not 'static, not even
-    // Copy-able in spirit — a real caller might pass a device handle here).
+    // Copy-able in spirit — a real caller might pass a config struct here).
     struct Dims {
         rows: usize,
         cols: usize,

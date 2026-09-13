@@ -1,19 +1,18 @@
 //! Variable-size scratch: one grow-only pool, and size-class pools.
 //!
-//! Real workloads do not always want the same buffer length, and a pool is
-//! size-blind: it recycles whatever it was given. Two standard answers, both
-//! built on `Vec`'s split between *length* (logical) and *capacity*
-//! (physical):
+//! A pool is size-blind: it recycles whatever buffer it was handed, whatever
+//! the next lease needs. Workloads whose buffer sizes vary have two standard
+//! answers, both built on `Vec`'s split between *length* (logical) and
+//! *capacity* (physical):
 //!
-//! 1. **Grow-only pool** (simplest, usually best): every buffer is a
-//!    `Vec` started from `Vec::new`, and every lease does `clear()` +
-//!    `resize(n, 0.0)`. Buffers grow to the high-water mark of demand and
-//!    keep that capacity, so all sizes share the same pool; a smaller lease
-//!    just uses a prefix.
+//! 1. **Grow-only pool** (simplest, usually best): every buffer starts as an
+//!    empty `Vec`, and every lease does `clear()` + `resize(n, 0.0)`.
+//!    Buffers grow to the high-water mark of demand and keep that capacity,
+//!    so all sizes share one pool; a smaller lease just uses a prefix.
 //!
 //! 2. **Size-class pools**: one pool per power-of-two capacity class, so a
-//!    task asking for 16 elements never ties up a 4096-element buffer until
-//!    the next big task comes. Useful when size variance is extreme.
+//!    task asking for 16 elements never ties up a 4096-element buffer.
+//!    Useful when size variance is extreme.
 //!
 //! Run with `cargo run --release --example size_buckets`.
 
@@ -58,7 +57,7 @@ impl ClassScratch {
         let pools = (4..=max_class)
             .map(|c| {
                 let cap = 1usize << c;
-                // Uninitialized capacity: contents are set per lease.
+                // Capacity only; contents are set per lease.
                 BufferPool::new(move || Vec::with_capacity(cap))
             })
             .collect();
@@ -88,24 +87,23 @@ fn run(name: &str, sizes: &[usize], scratch: &(dyn Fn(usize) -> Lease + Send + S
         })
         .sum();
 
-    let total_requested: usize = sizes.iter().sum();
     println!(
-        "{name}: {total:.1} over {} tasks, {} elements requested in total",
+        "{name}: {total:.1} over {} tasks of {}..={} elements",
         sizes.len(),
-        total_requested
+        sizes.iter().min().unwrap(),
+        sizes.iter().max().unwrap()
     );
 }
 
 fn main() {
-    // Deterministic pseudo-random task sizes spanning two orders of magnitude.
-    let mut seed = 0x2545F4914F6CDD1Du64;
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    let sizes: Vec<usize> = (0..512).map(|_| 16 + (next() % 4096) as usize).collect();
+    // Task sizes in 16..=4111 from a small linear congruential generator.
+    let mut seed = 1u32;
+    let sizes: Vec<usize> = (0..512)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            16 + (seed as usize) % 4096
+        })
+        .collect();
 
     let grow = AnySizeScratch::new();
     run("grow-only", &sizes, &|n| grow.get(n));
@@ -115,7 +113,7 @@ fn main() {
         grow.pool.stats().leases
     );
 
-    let classed = ClassScratch::new(sizes.iter().copied().max().unwrap());
+    let classed = ClassScratch::new(*sizes.iter().max().unwrap());
     run("size-class", &sizes, &|n| classed.get(n));
     let stats: Vec<_> = classed.pools.iter().map(|p| p.stats()).collect();
     let allocations: usize = stats.iter().map(|s| s.allocations).sum();

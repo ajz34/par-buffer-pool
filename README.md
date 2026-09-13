@@ -11,11 +11,11 @@ use rayon::prelude::*;
 // one pool per scratch kind, built once before the loop
 let pool = BufferPool::new(|| vec![0.0f64; 1 << 20]);
 
-let sums: Vec<f64> = (0..1000)
+let totals: Vec<f64> = (0..1000)
     .into_par_iter()
     .map(|task| {
         let mut buf = pool.get(); // fresh on first lease, recycled after
-        buf.iter_mut().enumerate().for_each(|(i, x)| *x = (task + i) as f64);
+        buf.fill(task as f64);
         buf.iter().sum::<f64>()   // buf returns itself at scope end
     })
     .collect();
@@ -29,26 +29,24 @@ let sums: Vec<f64> = (0..1000)
   of one big transient allocation per task.
 - **`Clone` handle, non-`'static` initializer.** Cheaply clone the pool into
   worker closures or store it in a driver struct; the initializer may borrow
-  dimensions, device handles, and config from the caller — no `'static`, no
+  dimensions, config, anything local from the caller — no `'static`, no
   cloning, no leaking.
 - **Zero dependencies, zero `unsafe`.** One `Mutex<Vec<T>>`, a closure, two
   atomics. `#![forbid(unsafe_code)]`.
 
-It is the productionized form of the `BufferPool` snippet that tends to get
-hand-copied into numerical codebases (it existed verbatim in at least two:
-`rstsr-showcase-hessian/src/util/buffer_pool.rs` and
-`rest/src/utilities/buffer_pool.rs`, with ~75 manual `get`/`put` call sites in
-the latter).
+It is the polished form of the `BufferPool` snippet that tends to get
+hand-copied into parallel codebases — the manual `get`/`put` dance around
+every closure, with the returns forgotten on some path.
 
 ## The problem
 
-Parallel numerical code loves this shape:
+Parallel code loves this shape:
 
 ```rust
-(0..ntask).into_par_iter().for_each(|itask| {
-    let mut scr = vec![0.0; nchunk * nao];  // fresh malloc per task
-    let mut out = vec![0.0; nchunk * nvar]; // ...and another
-    // a few dozen microseconds of math, then both are dropped
+(0..ntasks).into_par_iter().for_each(|task| {
+    let mut scratch = vec![0u8; 1 << 20]; // fresh malloc per task
+    let mut header = String::new();       // ...and another
+    // a few dozen microseconds of work, then both are dropped
 });
 ```
 
@@ -58,10 +56,10 @@ and memory footprint spikes per task instead of per thread. The usual
 hand-rolled fix is a manual pool:
 
 ```rust
-let mut scr_buf = scr_pool.get();   // ...
+let mut scratch = scratch_pool.get(); // ...
 // every early exit needs its own matching put —
 // real code has been seen with four put sites in one closure
-scr_pool.put(scr_buf);
+scratch_pool.put(scratch);
 ```
 
 which shifts the burden onto every caller, every branch, every panic path.
@@ -83,8 +81,8 @@ which shifts the burden onto every caller, every branch, every panic path.
 | `BufferPool: Clone` | Cheap shared-state handle (like `Arc`); guards keep the pool alive. |
 
 The pool never clears buffers on its own — accumulation buffers should use
-`with_reset(|b| b.fill(0.0))`, buffers fully overwritten per task (GEMM with
-`beta = 0`) should skip it.
+`with_reset(|b| b.fill(0.0))`, buffers fully overwritten by every task should
+skip it.
 
 `BufferPool<'a, T>` is `Send + Sync` whenever `T: Send`; `Pooled<'a, T>` is
 `Send` under the same condition, so leases may even migrate between threads.
@@ -92,14 +90,13 @@ The pool never clears buffers on its own — accumulation buffers should use
 ## Examples
 
 The [`examples/`](examples) directory is the documentation of record; each is
-runnable (`cargo run --release --example <name>`) and models a pattern from a
-real codebase:
+runnable (`cargo run --release --example <name>`):
 
 | Example | Pattern |
 |---|---|
-| [`rayon_scratch`] | The canonical one: two pools (scratch + output) in a rayon loop over DFT-style grid chunks, mutex-guarded reduction, stats printout. Mirrors `pure_eval_rho.rs`-style drivers. |
-| [`tiled_contraction`] | One `O(n²)` scratch matrix per pair task (RI-MP2/PT2-style); shows churn drop from `O(ntasks)` buffers to `O(nthreads)`. |
-| [`detach_collect`] | Scratch vs. result in the same task: escape-value scratch recycles, image strips detach via `into_inner`. |
+| [`rayon_scratch`] | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
+| [`pair_scores`] | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to `O(nthreads)`. |
+| [`detach_collect`] | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
 | [`size_buckets`] | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
 | [`scoped_threads`] | No rayon: `std::thread::scope`, cloned handles, an initializer borrowing stack-local config, and a reset hook. |
 | [`alloc_bench`] | `fresh` vs `pooled` vs rayon `map_init` on 2 MiB buffers: wall time (best-of-N) plus allocation counts. |
@@ -108,16 +105,15 @@ real codebase:
 
 - **Why not `thread_local!`?** It is the classic alternative and the classic
   trap: generic thread-local scratch that borrows non-`'static` data is
-  famously awkward (one of the projects above literally abandoned it), and
-  thread-locals persist for the life of the thread. A shared pool has none of
-  those problems and dies with its last handle.
+  famously awkward, and thread-locals persist for the life of the thread. A
+  shared pool has none of those problems and dies with its last handle.
 - **Why not per-thread slots (`Vec<Mutex<T>>` indexed by thread id)?** Fragile
   sizing, idle buffers for absent threads, and no sharing across differently
-  shaped loops; also tried and replaced in one of the projects above.
+  shaped loops.
 - **Why not rayon `for_each_init`/`map_init`?** Fine — and lock-free — when a
   *single* loop owns all its scratch; but scratch cannot detach into results,
-  and the initializer re-runs per loop invocation, so repeated calls (every
-  SCF iteration, every Hessian row) keep churning. Pools also serve plain
+  and the initializer re-runs per loop invocation, so loops called repeatedly
+  (per request, per frame, per batch) keep churning. Pools also serve plain
   threads and nested parallelism.
 - **Locking.** One `Mutex` guards a `Vec`; the critical section is `pop`/`push`
   (~tens of ns). New buffers are allocated outside the lock. Contention only
@@ -126,9 +122,8 @@ real codebase:
   poisoned mutex is recovered via `PoisonError::into_inner` — no panic loops,
   no leaked idle buffers.
 - **Memory budgeting.** `stats().allocations` bounds concurrently outstanding
-  leases: budget scratch as `allocations × buffer_size` (e.g.
-  `nthreads × nchunk × (nao + nvar) × 8` bytes). `with_max_idle` keeps bursts
-  from parking buffers forever.
+  leases: budget scratch as `allocations × buffer_len × size_of::<T>()`.
+  `with_max_idle` keeps bursts from parking buffers forever.
 - **Honest limits.** Recycled buffers carry stale contents (use `with_reset`);
   a recycled small hot buffer pays a cross-core cache-line transfer on its
   next use; tiny cheap buffers are better left to the allocator.
@@ -153,7 +148,7 @@ publication).
 [`BufferPool::stats()`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.stats
 [`Pooled::into_inner()`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.Pooled.html#method.into_inner
 [`rayon_scratch`]: examples/rayon_scratch.rs
-[`tiled_contraction`]: examples/tiled_contraction.rs
+[`pair_scores`]: examples/pair_scores.rs
 [`detach_collect`]: examples/detach_collect.rs
 [`size_buckets`]: examples/size_buckets.rs
 [`scoped_threads`]: examples/scoped_threads.rs

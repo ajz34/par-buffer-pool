@@ -4,19 +4,19 @@
 //! for reusing scratch buffers across parallel workers (rayon, scoped threads,
 //! ...).
 //!
-//! It exists because of a pattern that shows up in every numerical codebase:
-//! a parallel loop over many small work items where every item needs the same
-//! kind of temporary buffer.
+//! It exists because of a pattern that shows up in every parallel codebase:
+//! a loop over many small work items where every item needs the same kind of
+//! temporary buffer.
 //!
 //! ```text
-//! (0..ntask).into_par_iter().for_each(|itask| {
-//!     let mut scr = vec![0.0; nchunk * nao];   // <- fresh malloc per task
-//!     let mut out = vec![0.0; nchunk * nvar];  // <- and another one
-//!     // ... a few microseconds of math, then both are dropped ...
+//! (0..ntasks).into_par_iter().for_each(|task| {
+//!     let mut scratch = vec![0.0; 1 << 20]; // <- fresh malloc per task
+//!     let mut header = String::new();       // <- and another one
+//!     // ... a few microseconds of work, then both are dropped ...
 //! });
 //! ```
 //!
-//! The buffers are large enough that allocating them costs more than the math,
+//! The buffers are large enough that allocating them costs more than the work,
 //! and short-lived enough that they are immediately re-allocated by the next
 //! task. Worse, peak memory is not *one* buffer but *nthreads* of them, so the
 //! allocator gets hammered with big transient allocations from every thread.
@@ -47,9 +47,7 @@
 //!     .into_par_iter()
 //!     .map(|task| {
 //!         let mut buf = pool.get(); // fresh on first lease, recycled after
-//!         for (i, b) in buf.iter_mut().enumerate() {
-//!             *b = (task * n + i) as f64;
-//!         }
+//!         buf.fill(task as f64);
 //!         buf.iter().sum() // `buf` returns itself to the pool at scope end
 //!     })
 //!     .collect();
@@ -67,9 +65,7 @@
 //! A manual `get`/`put` pool asks the caller to match every checkout with a
 //! return, in every branch, on every error path, through every `?` and panic.
 //! In practice the `put` calls end up duplicated per branch and are still
-//! forgotten on some path (see the `examples/` directory for a migration of
-//! real code with four `put` sites in one closure). With a guard there is
-//! nothing to match:
+//! forgotten on some path. With a guard there is nothing to match:
 //!
 //! ```rust
 //! # use par_buffer_pool::BufferPool;
@@ -119,7 +115,7 @@
 //!
 //! Recycled buffers keep their previous contents by design — clearing is a
 //! per-workload decision (accumulation buffers need it; buffers that get fully
-//! overwritten, e.g. by a GEMM with `beta = 0`, must not pay for it). If all
+//! overwritten anyway must not pay for it). If all
 //! leases of a pool start from the same known state, register a reset hook with
 //! [`BufferPool::with_reset`]; it runs on every return, so every lease starts
 //! reset:
@@ -145,8 +141,8 @@
 //! ## Non-`'static` initializers
 //!
 //! [`BufferPool`] carries a lifetime `'a` bounding its initializer, so the
-//! closure may borrow from the caller — a dimensions tuple, a device handle, a
-//! config struct — without requiring `'static` or cloning:
+//! closure may borrow from the caller — a dimensions tuple, a formatting
+//! config, a connection handle — without requiring `'static` or cloning:
 //!
 //! ```rust
 //! # use par_buffer_pool::BufferPool;
@@ -166,30 +162,25 @@
 //! }); // guards returned; pool dies with `dims`, no 'static bound anywhere
 //! ```
 //!
-//! ## Bridging to tensor libraries (rstsr, ndarray, ...)
+//! ## Any buffer type, and views over it
 //!
-//! The pool stores plain owned storage (`Vec<f64>`); libraries that wrap
-//! borrowed storage into views make the bridge a one-liner inside each task.
-//! The classic rstsr DFT-grid pattern becomes:
+//! The pool stores whatever `T` you build — `Vec<f64>`, `String`, `Vec<u8>`,
+//! or your own struct. And because the guard derefs to `T`, per-task views
+//! over the pooled storage (sub-slices, or wrappers from view-based libraries
+//! such as `ndarray` or `bytes`) are a one-liner inside each task; the
+//! storage returns to the pool when the guard drops, view or no view:
 //!
-//! ```rust,ignore
-//! use par_buffer_pool::BufferPool;
-//! use rayon::prelude::*;
+//! ```rust
+//! # use par_buffer_pool::BufferPool;
+//! // One pool per scratch kind, created once *before* the parallel section.
+//! let frame_pool = BufferPool::new(|| vec![0u8; 4 + 64]); // header + payload
 //!
-//! // `device` is borrowed from the caller — this is why `new` is not 'static.
-//! let scr_pool = BufferPool::new(|| vec![0.0; nchunk * nao]);
-//! let out_pool = BufferPool::new(|| vec![0.0; nchunk * nvar]);
-//!
-//! (0..ntask).into_par_iter().for_each(|itask| {
-//!     let mut scr_buf = scr_pool.get();
-//!     let mut out_buf = out_pool.get();
-//!     // pooled storage is wrapped into (borrowed) tensors per task
-//!     let mut scr = rt::asarray((&mut *scr_buf, [chunk_size, nao].f(), &device));
-//!     let mut out = rt::asarray((&mut *out_buf, [chunk_size, nvar].f(), &device));
-//!     out.fill(0.0);                            // ...or use `.with_reset`
-//!     scr.matmul_from(&ao_chunk, &dm, 1.0, 0.0);
-//!     // ... use `out` ... then reduce under a lock, etc.
-//! }); // both buffers return themselves — no `put` calls at all
+//! let mut frame = frame_pool.get();
+//! let (header, payload) = frame.split_at_mut(4); // views over pooled storage
+//! header.copy_from_slice(&64u32.to_be_bytes());
+//! payload.fill(b'.');
+//! assert_eq!(frame.len(), 68);
+//! // `frame` returns to the pool here; the views simply die with it
 //! ```
 //!
 //! ## When *not* to use this
@@ -221,8 +212,8 @@
 //! - **Memory growth.** [`BufferPool::stats`] reports how many leases were
 //!   served and how many buffers had to be allocated; `allocations` is an
 //!   upper bound on concurrently outstanding leases, which is the number to
-//!   multiply by buffer size when budgeting scratch memory (e.g. `nthreads *
-//!   nchunk * (nao + nvar) * 8` bytes in the grid pattern above).
+//!   multiply by buffer size when budgeting scratch memory (e.g.
+//!   `allocations * len * size_of::<T>()` bytes for `Vec`-like buffers).
 //! - **`Clone` handles.** [`BufferPool`] is a cheap handle around shared
 //!   state (like `Arc`): clone it into worker closures or store it in a driver
 //!   struct; guards keep the pool alive even if all handles are dropped.
@@ -272,7 +263,7 @@ impl PoolStats {
 /// rayon or scoped threads by reference or by cloning.
 ///
 /// The lifetime `'a` bounds the initializer closure, allowing it to borrow
-/// non-`'static` data (dimensions, device handles, configuration) from the
+/// non-`'static` data (dimensions, configuration, shared handles) from the
 /// surroundings; the pool simply must not outlive what its initializer
 /// borrows.
 ///
@@ -362,7 +353,7 @@ impl<'a, T> BufferPool<'a, T> {
     ///
     /// Typical use: `|buf: &mut Vec<f64>| buf.fill(0.0)` for accumulation
     /// buffers. Skip the hook entirely when every consumer fully overwrites
-    /// the buffer (e.g. a GEMM with `beta = 0`) — resets are not free.
+    /// the buffer anyway — resets are not free.
     pub fn with_reset(mut self, reset: impl Fn(&mut T) + Send + Sync + 'a) -> Self {
         Arc::get_mut(&mut self.inner)
             .expect("freshly built pool is uniquely owned")

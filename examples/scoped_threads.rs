@@ -4,15 +4,12 @@
 //! workers. This example exists to show the `'a` in
 //! [`BufferPool<'a, T>`](par_buffer_pool::BufferPool) earning its keep:
 //!
-//!   * the initializer closures borrow fields of a plain stack-local
-//!     `WorkspacePlan` — not `'static`, not `Clone`, no leaking;
+//!   * the initializer borrows a field of a plain stack-local `Settings` —
+//!     not `'static`, not `Clone`, no leaking;
 //!   * each worker receives its *own handle* via [`BufferPool::clone`]
-//!     (cheap, like cloning an `Arc`), so workers can even outlive the
-//!     original binding as long as the scope lives;
-//!   * the out pool registers a reset hook, so every lease starts zeroed
-//!     without any `fill(0.0)` at the call site.
-//!
-//! The pool (and the plan it borrows from) die together at the end of `main`.
+//!     (cheap, like cloning an `Arc`);
+//!   * the pool registers a reset hook, so every lease starts empty without
+//!     any `clear()` at the call site.
 //!
 //! Run with `cargo run --release --example scoped_threads`.
 
@@ -20,61 +17,55 @@ use std::thread;
 
 use par_buffer_pool::BufferPool;
 
-/// Per-call workspace sizing, borrowed (not moved, not cloned) by the pools.
-struct WorkspacePlan {
-    points: usize,
-    nvar: usize,
-    // imagine: device handles, operator tables, anything non-'static
+/// Formatting settings, borrowed (not moved, not cloned) by the pool.
+struct Settings {
+    columns: usize,
+    separator: char,
 }
 
 fn main() {
-    let plan = WorkspacePlan {
-        points: 10_000,
-        nvar: 4,
+    let settings = Settings {
+        columns: 16,
+        separator: ';',
     };
-    let nthreads = 8;
-    let leases_per_thread = 500;
+    let nthreads = 4;
+    let rows_per_thread = 250;
 
-    // Both initializers borrow `plan` — possible because `new` bounds its
-    // closure by `'a`, not `'static`.
-    let scr_pool: BufferPool<Vec<f64>> = BufferPool::new(|| vec![0.0; plan.points]);
-    let out_pool: BufferPool<Vec<f64>> =
-        BufferPool::new(|| vec![0.0; plan.nvar]).with_reset(|buf| buf.fill(0.0));
+    // The initializer borrows `settings` — a plain stack local. This works
+    // because `new` bounds its closure by `'a`, not `'static`. The reset hook
+    // empties each row on its way back into the pool.
+    let row_pool = BufferPool::new(|| String::with_capacity(settings.columns * 2))
+        .with_reset(|row| row.clear());
 
     thread::scope(|s| {
         for t in 0..nthreads {
-            // Clone handles into each worker (shared state, not shared buffers).
-            let scr_pool = scr_pool.clone();
-            let out_pool = out_pool.clone();
+            // Clone a handle into each worker (shared state, not shared buffers).
+            let row_pool = row_pool.clone();
             s.spawn(move || {
-                let mut grand_total = 0.0f64;
-                for k in 0..leases_per_thread {
-                    let mut scr = scr_pool.get();
-                    // deterministic fill standing in for real evaluation
-                    for (i, x) in scr.iter_mut().enumerate() {
-                        *x = ((i * (t + 1) + k) % 100) as f64;
+                for k in 0..rows_per_thread {
+                    let mut row = row_pool.get(); // starts empty via the reset hook
+                    for c in 0..settings.columns {
+                        if c > 0 {
+                            row.push(settings.separator);
+                        }
+                        row.push((b'0' + ((t + k) % 10) as u8) as char);
                     }
-
-                    let mut out = out_pool.get(); // starts zeroed via with_reset
-                    for v in 0..plan.nvar {
-                        out[v] += scr.iter().sum::<f64>() * (v + 1) as f64;
-                    }
-                    grand_total += out[0];
-                    // both guards return their buffers here — every iteration
-                }
-                println!("worker {t}: partial {grand_total:.3}");
+                    // ... queue or send `row` somewhere ...
+                    assert_eq!(row.len(), 2 * settings.columns - 1);
+                } // `row` returns to the pool here, every iteration
             });
         }
     });
 
-    // `plan` is still borrowed by the pools, so it must outlive them — and it
-    // does; dropping everything in reverse order just works.
-    let scr_stats = scr_pool.stats();
-    let out_stats = out_pool.stats();
+    // `settings` is still borrowed by the pool, so it must outlive it — and
+    // it does; dropping everything in reverse order just works.
+    let stats = row_pool.stats();
     println!(
-        "scr: {} leases / {} allocations; out: {} leases / {} allocations",
-        scr_stats.leases, scr_stats.allocations, out_stats.leases, out_stats.allocations
+        "{} leases, {} allocations (nthreads = {nthreads}), {} served from recycle",
+        stats.leases,
+        stats.allocations,
+        stats.reuses()
     );
-    assert_eq!(scr_stats.leases, nthreads * leases_per_thread);
-    assert!(scr_stats.allocations <= nthreads);
+    assert_eq!(stats.leases, nthreads * rows_per_thread);
+    assert!(stats.allocations <= nthreads);
 }

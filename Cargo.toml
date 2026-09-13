@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.66"
 license = "MIT OR Apache-2.0"
-description = "A tiny, dependency-free, thread-safe buffer pool with RAII guards, for reusing scratch buffers across rayon/std threads"
+description = "A tiny, dependency-free, thread-safe buffer pool with RAII guards, for reusing scratch buffers across parallel workers"
 readme = "README.md"
-keywords = ["pool", "buffer", "rayon", "reuse", "no-std"]
-categories = ["concurrency", "memory-management", "science"]
+keywords = ["pool", "buffer", "scratch", "rayon", "reuse"]
+categories = ["concurrency", "memory-management", "rust-patterns"]
 # there are intentionally no runtime dependencies
 
 [dependencies]
@@ -20,7 +20,7 @@ name = "rayon_scratch"
 doc-scrape-examples = true
 
 [[example]]
-name = "tiled_contraction"
+name = "pair_scores"
 doc-scrape-examples = true
 
 [[example]]
