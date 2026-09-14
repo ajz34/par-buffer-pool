@@ -78,8 +78,8 @@ scope guard.
 ## Which pool?
 
 Both pools share one API shape — `new` / `get` (a guard) / `with` / `put` /
-`into_inner` / `with_reset` / `stats`, plus `with_max_idle` and `drain` on
-[`BufferPool`] only — so switching is mostly a type swap.
+`into_inner` / `with_reset` / `stats`, plus `with_max_idle`, `prefill`, and
+`drain` on [`BufferPool`] only — so switching is mostly a type swap.
 The difference is the lease mechanism, and it shows up in exactly one place:
 **many small tasks at high worker counts favor `ThreadLocalPool`; everything
 else is a feature choice.**

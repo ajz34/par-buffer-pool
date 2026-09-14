@@ -364,3 +364,24 @@ fn pooled_works_for_non_default_and_odd_types() {
     let _ = pool.get();
     assert_eq!(pool.stats().allocations, 1);
 }
+
+#[test]
+fn default_pool_initializes_with_t_default() {
+    let pool = BufferPool::<Vec<u8>>::default();
+    assert_eq!(pool.idle_len(), 0, "lazy: nothing preallocated");
+    assert_eq!(*pool.get(), Vec::<u8>::new());
+}
+
+#[test]
+fn prefill_warms_the_pile_eagerly() {
+    let pool = BufferPool::new(|| vec![0u8; 4]).with_max_idle(2).prefill(5);
+    assert_eq!(pool.idle_len(), 2, "prefill respects a cap set before it");
+    let stats = pool.stats();
+    assert_eq!(stats.leases, 0, "prefill is not a lease");
+    assert_eq!(stats.allocations, 5, "prefill ran the initializer five times");
+
+    let buf = pool.get(); // served from the prefill
+    assert_eq!(*buf, vec![0u8; 4]);
+    drop(buf);
+    assert_eq!(pool.idle_len(), 2, "steady state under the cap");
+}

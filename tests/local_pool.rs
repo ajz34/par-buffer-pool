@@ -364,3 +364,10 @@ fn pools_of_many_types_share_one_registry_safely() {
     assert_eq!(c.idle_len(), 1);
     assert_eq!(&*a.get(), &[1, 1, 1], "no cross-type slot confusion");
 }
+
+#[test]
+fn default_pool_initializes_with_t_default() {
+    let pool = ThreadLocalPool::<Vec<u8>>::default();
+    assert_eq!(pool.idle_len(), 0, "lazy: this thread's slot is empty");
+    assert_eq!(*pool.get(), Vec::<u8>::new());
+}

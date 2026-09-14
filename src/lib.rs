@@ -64,8 +64,11 @@
 //!     })
 //!     .collect();
 //!
+//! # #[cfg(feature = "stats")]
+//! # {
 //! let stats = pool.stats();
 //! assert_eq!(stats.leases, 64); // every task took a lease
+//! # }
 //! ```
 //!
 //! The same shape works verbatim with [`std::thread::scope`], async runtimes,
@@ -75,9 +78,9 @@
 //! ## Which pool?
 //!
 //! Both pools share one API shape — `new` / `get` (a guard) / `with` /
-//! `put` / `into_inner` / `with_reset` / `stats`, plus `with_max_idle` and
-//! `drain` on [`BufferPool`] only — so switching between them is mostly a
-//! type swap. They differ in mechanism, and the mechanism shows
+//! `put` / `into_inner` / `with_reset` / `stats`, plus `with_max_idle`,
+//! `prefill`, and `drain` on [`BufferPool`] only — so switching between them
+//! is mostly a type swap. They differ in mechanism, and the mechanism shows
 //! up in exactly one place: **many small tasks at high worker counts favor
 //! [`ThreadLocalPool`]; everything else is a feature choice.**
 //!
@@ -116,12 +119,13 @@
 //!
 //! | Item | What it does |
 //! |---|---|
-//! | [`new`](BufferPool::new) | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty. |
+//! | [`new`](BufferPool::new) | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty (unless `prefill` was called). |
 //! | [`get`](BufferPool::get) | Lease a buffer as a guard ([`SharedPooled`] / [`LocalPooled`], [`std::ops::Deref`] / [`std::ops::DerefMut`] to `T`). |
 //! | guard drop | Return the buffer — on scope exit, early return, or panic unwind. |
 //! | [`with`](BufferPool::with) | Closure-based checkout of the same mechanism. |
 //! | `into_inner` | Detach the buffer when it *is* the result (not recycled). |
 //! | [`put`](BufferPool::put) | Manual return for detached/raw buffers. |
+//! | [`prefill`](BufferPool::prefill) | Eagerly fill the shared pool before a latency-sensitive phase (`BufferPool` only). |
 //! | [`drain`](BufferPool::drain) | Empty the idle pile into a [`Vec`] — best effort: leases still out are silently not included and park again afterwards, so call it between phases, once every guard has been dropped. Reset hooks do not run; the pool keeps working. ([`ThreadLocalPool`] has none: per-thread slots are unreachable cross-thread.) |
 //! | [`with_reset`](BufferPool::with_reset) | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
 //! | [`with_max_idle`](BufferPool::with_max_idle) | Cap idle buffers; returns beyond the cap are dropped. ([`ThreadLocalPool`] needs no cap.) |
@@ -352,7 +356,11 @@
 //!   dropped it flips a shared liveness flag and bumps a global epoch;
 //!   each thread's next registry access sweeps its own dead slots (one
 //!   `Acquire` load on the fast path), and thread exit reclaims whatever
-//!   was left. No `unsafe` anywhere.
+//!   was left. No `unsafe` anywhere. One inherited TLS trait: the registry
+//!   is indexed by dense pool id and never compacted, so an application
+//!   that churns through many short-lived pools leaves a few dozen bytes
+//!   of empty slot per dead pool on each thread that touched it, until
+//!   thread exit.
 //! - **Memory growth.** With the `stats` feature (see "Feature flags"
 //!   above), `allocations` is an upper bound on concurrently outstanding
 //!   leases, which is the number to multiply by buffer size when budgeting

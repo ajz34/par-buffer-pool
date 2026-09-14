@@ -22,6 +22,21 @@
 //!   reliably: each thread discards them on its next pool interaction, and
 //!   thread exit is the hard backstop. Memory lingers only on threads that
 //!   never touch any [`ThreadLocalPool`] again while staying alive.
+//!
+//! Three TLS-inherited caveats, for completeness:
+//!
+//! - The per-thread registry is indexed by dense pool id and never compacted:
+//!   it grows to the highest id the thread has touched, so an application
+//!   that churns through many short-lived pools leaves a few dozen bytes of
+//!   empty slot per dead pool on each thread that touched it, until the
+//!   thread exits.
+//! - "Thread exit reclaims" means the platform's TLS destructors, which are
+//!   best-effort (skipped, for instance, for a main thread exiting on Unix) —
+//!   at which point the process is ending anyway.
+//! - Keep buffer destructors pool-agnostic: a buffer's `Drop` can run while
+//!   the thread's registry is borrowed (when a nested lease overwrites the
+//!   parked one) or during thread-exit destruction, and re-entering any
+//!   [`ThreadLocalPool`] from there panics.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -32,6 +47,12 @@ use std::sync::Arc;
 
 #[cfg(feature = "stats")]
 use crate::buffer::PoolStats;
+
+/// The boxed initializer stored inside a pool.
+type InitFn<T> = Box<dyn Fn() -> T + Send + Sync>;
+
+/// The boxed reset hook stored inside a pool (when one is registered).
+type ResetFn<T> = Box<dyn Fn(&mut T) + Send + Sync>;
 
 /// A parked buffer, type-erased so that one concrete thread-local registry
 /// can serve pools of every element type. Slots are written and read back
@@ -71,16 +92,18 @@ struct Registry {
 // This thread's registry, for every `ThreadLocalPool` of every element type
 // (one concrete `thread_local!`; buffers are type-erased per slot).
 //
-// Deliberately NOT a `const {}` initializer: the non-const form pays one
-// lazy-init branch per access (~ns, and gone after first use), and it
-// registers a thread-exit destructor — which is the reclamation backstop.
-// When a thread dies, its registry drops, releasing every parked buffer it
-// still holds.
+// Const-initialized (`const {}`): the initializer is compile-time work, so
+// access skips the lazy-init branch entirely. Because `Registry` owns heap
+// allocations, a thread-exit destructor is still registered — which is the
+// reclamation backstop: when a thread dies, its registry drops, releasing
+// every parked buffer it still holds.
 thread_local! {
-    static REGISTRY: RefCell<Registry> = RefCell::new(Registry {
-        seen_epoch: 0,
-        slots: Vec::new(),
-    });
+    static REGISTRY: RefCell<Registry> = const {
+        RefCell::new(Registry {
+            seen_epoch: 0,
+            slots: Vec::new(),
+        })
+    };
 }
 
 /// Runs `f` with this thread's registry, first performing the lazy
@@ -95,9 +118,9 @@ fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
             for slot in &mut reg.slots {
                 if slot.buf.is_some() && !slot.live.load(Ordering::Relaxed) {
                     // The pool is gone: drop its buffer (running `T`'s own
-                    // destructor, no reset hook — the pool that owned the
-                    // hook no longer exists). Mirrors `BufferPool`'s
-                    // `with_max_idle` overflow, which also drops unreset.
+                    // destructor; no reset hook — the pool that owned the
+                    // hook no longer exists). This is the only drop path that
+                    // bypasses the hook: every *return* path runs it.
                     slot.buf = None;
                 }
             }
@@ -172,8 +195,8 @@ pub struct ThreadLocalPool<T> {
 }
 
 struct LocalInner<T> {
-    init: Box<dyn Fn() -> T + Send + Sync>,
-    reset: Option<Box<dyn Fn(&mut T) + Send + Sync>>,
+    init: InitFn<T>,
+    reset: Option<ResetFn<T>>,
     /// Shared liveness flag; every parked slot holds a clone. False once this
     /// pool is dropped.
     live: Arc<AtomicBool>,
@@ -228,7 +251,16 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
     /// as [`BufferPool::with_reset`](crate::BufferPool::with_reset). The hook
     /// runs when a [`LocalPooled`] guard is dropped and on manual
     /// [`put`](ThreadLocalPool::put). Buffers reclaimed after the pool is
-    /// dropped are dropped without being reset (the hook is gone by then).
+    /// dropped are dropped without being reset (the hook is gone by then);
+    /// so are buffers released at thread exit, where no hook is consulted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this pool's shared state has been cloned or otherwise
+    /// shared: the hook is installed in place, on the assumption that a
+    /// freshly built pool is uniquely owned. Build the pool fully (chaining
+    /// [`with_reset`](ThreadLocalPool::with_reset) off
+    /// [`new`](ThreadLocalPool::new)) before cloning or sharing handles.
     pub fn with_reset(mut self, reset: impl Fn(&mut T) + Send + Sync + 'static) -> Self {
         let inner = Arc::get_mut(&mut self.inner)
             .expect("freshly built pool is uniquely owned");
@@ -387,9 +419,18 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
     /// is set). The slot is created on demand — a guard that migrated from
     /// another thread parks here even if this thread never leased before.
     /// The slot holds a single buffer: parking over a parked one (possible
-    /// only via migration or nested leases) drops the previous buffer.
+    /// only via a migrated guard, a nested lease, or a repeated manual
+    /// [`put`](ThreadLocalPool::put)) drops the previous buffer.
     fn park(&self, buffer: T) {
         self.park_erased(Box::new(buffer));
+    }
+}
+
+impl<T: Default + Send + 'static> Default for ThreadLocalPool<T> {
+    /// A pool whose initializer is [`Default::default`] — buffers are made
+    /// by `T::default`, lazily, exactly as in [`ThreadLocalPool::new`].
+    fn default() -> Self {
+        ThreadLocalPool::new(T::default)
     }
 }
 

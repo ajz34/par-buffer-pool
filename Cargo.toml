@@ -32,41 +32,66 @@ par-buffer-pool = { path = ".", features = ["stats"] }
 # for `cargo doc` is fine — without it the examples are skipped as
 # "requiring dev-dependencies". The two microbenchmarks opt out: they
 # document performance, not usage.
+# Every example uses the `stats` feature, so `required-features` skips them
+# when it is off — e.g. `cargo test` on the published crate, where the self
+# dev-dependency is stripped. In this repository the self dev-dependency
+# keeps `stats` (and thus all examples) on for tests, examples, and docs.
 [[example]]
 name = "rayon_scratch"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "pair_scores"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "detach_collect"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "size_buckets"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "scoped_threads"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "drain_reduce"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "non_static_init"
 doc-scrape-examples = true
+required-features = ["stats"]
 
 [[example]]
 name = "alloc_bench"
 doc-scrape-examples = false
+required-features = ["stats"]
 
 [[example]]
 name = "local_static_bench"
 doc-scrape-examples = false
+required-features = ["stats"]
+
+# The integration tests are `stats`-gated for the same reason as the
+# examples: on the published crate (self dev-dependency stripped, `stats`
+# off) they are skipped, so a plain `cargo test` there still passes. In this
+# repository the self dev-dependency keeps them running.
+[[test]]
+name = "pool"
+required-features = ["stats"]
+
+[[test]]
+name = "local_pool"
+required-features = ["stats"]
 
 # docs.rs build configuration (https://docs.rs/about/metadata):
 # 1. `all-features` documents the `stats`-gated API as well.

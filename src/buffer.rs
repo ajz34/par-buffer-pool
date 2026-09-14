@@ -97,9 +97,10 @@ impl<'a, T> BufferPool<'a, T> {
     /// Creates a pool whose buffers are made by `init`.
     ///
     /// `init` runs lazily, only when a lease finds the pool empty — never
-    /// eagerly. It may borrow from the surroundings (hence `'a` instead of a
-    /// `'static` bound). The pool starts empty with no idle cap; see
-    /// [`with_max_idle`](BufferPool::with_max_idle) and
+    /// eagerly (the one exception being [`prefill`](BufferPool::prefill),
+    /// which opts into eagerness). It may borrow from the surroundings
+    /// (hence `'a` instead of a `'static` bound). The pool starts empty with
+    /// no idle cap; see [`with_max_idle`](BufferPool::with_max_idle) and
     /// [`with_reset`](BufferPool::with_reset) for the optional knobs.
     ///
     /// # Example
@@ -133,6 +134,13 @@ impl<'a, T> BufferPool<'a, T> {
     /// worker count keeps steady-state recycling intact; a cap exists so that
     /// a burst of concurrency cannot park its buffers in the pool forever.
     /// The default is unbounded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this pool's shared state has been cloned or otherwise
+    /// shared: the cap is installed in place, on the assumption that a
+    /// freshly built pool is uniquely owned. Build the pool fully (chaining
+    /// this off [`new`](BufferPool::new)) before cloning or sharing handles.
     pub fn with_max_idle(mut self, max_idle: usize) -> Self {
         Arc::get_mut(&mut self.inner)
             .expect("freshly built pool is uniquely owned")
@@ -144,17 +152,66 @@ impl<'a, T> BufferPool<'a, T> {
     /// style), so that every lease starts from a known state.
     ///
     /// `reset` runs when a [`SharedPooled`] guard is dropped and on manual
-    /// [`put`](BufferPool::put) — i.e. on *every* path into the pool. Buffers
-    /// discarded because [`with_max_idle`](BufferPool::with_max_idle) is
-    /// reached are dropped without being reset.
+    /// [`put`](BufferPool::put) — i.e. on *every* path into the pool,
+    /// including a return that the idle cap then discards (the hook runs
+    /// before the cap is consulted, because user code must never run under
+    /// the idle lock). The one drop path that skips the hook is
+    /// [`drain`](BufferPool::drain), which hands buffers out of the pool
+    /// rather than into it.
     ///
     /// Typical use: `|buf: &mut Vec<f64>| buf.fill(0.0)` for accumulation
     /// buffers. Skip the hook entirely when every consumer fully overwrites
     /// the buffer anyway — resets are not free.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this pool's shared state has been cloned or otherwise
+    /// shared: the hook is installed in place, on the assumption that a
+    /// freshly built pool is uniquely owned. Build the pool fully (chaining
+    /// [`with_reset`](BufferPool::with_reset) off [`new`](BufferPool::new))
+    /// before cloning or sharing handles.
     pub fn with_reset(mut self, reset: impl Fn(&mut T) + Send + Sync + 'a) -> Self {
         Arc::get_mut(&mut self.inner)
             .expect("freshly built pool is uniquely owned")
             .reset = Some(Box::new(reset));
+        self
+    }
+
+    /// Eagerly fills the pool with `n` fresh buffers (builder style), so a
+    /// latency-sensitive phase does not pay the initializer inside its first
+    /// parallel leases.
+    ///
+    /// The buffers are built by the same `init` closure [`new`](BufferPool::new)
+    /// stores — this is the one place the initializer runs eagerly. Each
+    /// buffer goes through the normal return path: a reset hook registered
+    /// with [`with_reset`](BufferPool::with_reset) runs, and a cap set with
+    /// [`with_max_idle`](BufferPool::with_max_idle) limits how many are kept
+    /// (chain it before this call if the fill should respect the cap;
+    /// prefilling past the cap just drops the excess).
+    ///
+    /// [`ThreadLocalPool`](crate::ThreadLocalPool) has no `prefill`: each
+    /// thread warms its own slot with its first lease, and there is no
+    /// cross-thread pile to fill from here.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use par_buffer_pool::BufferPool;
+    /// let pool = BufferPool::new(|| vec![0u8; 1024]).prefill(4);
+    /// assert_eq!(pool.idle_len(), 4); // warm before the parallel phase
+    ///
+    /// let mut buf = pool.get(); // served from the prefill, no init run
+    /// assert_eq!(buf.len(), 1024);
+    /// # #[cfg(feature = "stats")]
+    /// # assert_eq!(pool.stats().allocations, 4);
+    /// ```
+    pub fn prefill(self, n: usize) -> Self {
+        for _ in 0..n {
+            #[cfg(feature = "stats")]
+            self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+            let buffer = (self.inner.init)();
+            self.inner.recycle(buffer);
+        }
         self
     }
 
@@ -367,6 +424,9 @@ impl<'a, T> PoolInner<'a, T> {
     /// dropping it when the idle cap is reached.
     fn recycle(&self, buffer: T) {
         let mut buffer = buffer;
+        // The reset runs before the cap check, and outside the lock: user
+        // code must never run under the idle lock, so a buffer discarded at
+        // the cap still pays one hook call — the documented contract.
         if let Some(reset) = &self.reset {
             reset(&mut buffer);
         }
@@ -384,6 +444,14 @@ impl<'a, T> Clone for BufferPool<'a, T> {
         BufferPool {
             inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+impl<'a, T: Default + 'a> Default for BufferPool<'a, T> {
+    /// A pool whose initializer is [`Default::default`] — buffers are made
+    /// by `T::default`, lazily, exactly as in [`BufferPool::new`].
+    fn default() -> Self {
+        BufferPool::new(T::default)
     }
 }
 

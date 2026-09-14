@@ -100,6 +100,11 @@ fn main() {
     );
 
     // The scratch pool recycled; the result pool did not (and should not).
-    assert!(escape_pool.stats().reuses() > 0);
-    assert_eq!(strip_pool.stats().allocations, STRIPS);
+    // (Guarded: a machine with STRIPS or more rayon workers can serve every
+    // strip concurrently, so no lease ever finds a parked buffer — reuses
+    // is legitimately zero there.)
+    if rayon::current_num_threads() < STRIPS {
+        assert!(scratch_stats.reuses() > 0);
+    }
+    assert_eq!(result_stats.allocations, STRIPS);
 }
