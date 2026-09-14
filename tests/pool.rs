@@ -5,7 +5,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use par_buffer_pool::{BufferPool, SharedPooled};
 use rayon::prelude::*;
@@ -209,6 +212,36 @@ fn drain_skips_outstanding_leases_and_the_reset_hook() {
     drop(held); // parks after the drain, through the hook as usual
     assert_eq!(pool.idle_len(), 1);
     assert_eq!(resets.load(Ordering::SeqCst), resets_after_return + 1);
+}
+
+// Registered before its pool's first lease so the initializer can re-enter
+// the pool through `idle_len`. If `get` ever runs the initializer under the
+// idle lock again, that nested lock deadlocks the thread against itself and
+// the `recv_timeout` in the test below trips.
+static REENTRANT: Mutex<Option<BufferPool<'static, Vec<u8>>>> = Mutex::new(None);
+
+#[test]
+fn initializer_runs_outside_the_idle_lock() {
+    let pool = BufferPool::new(|| {
+        REENTRANT
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("the pool is registered before its first lease")
+            .idle_len();
+        vec![0u8; 4]
+    });
+    REENTRANT.lock().unwrap().replace(pool.clone());
+
+    let (tx, rx) = mpsc::channel();
+    let driver = thread::spawn(move || {
+        drop(pool.get()); // the first lease runs the initializer
+        tx.send(()).expect("the test is still waiting");
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("initializer deadlocked against the idle lock");
+    driver.join().expect("lease thread finished cleanly");
+    REENTRANT.lock().unwrap().take(); // leave the static clean
 }
 
 #[test]

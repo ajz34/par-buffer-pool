@@ -176,13 +176,22 @@ impl<'a, T> BufferPool<'a, T> {
     pub fn get(&self) -> SharedPooled<'a, T> {
         #[cfg(feature = "stats")]
         self.inner.leases.fetch_add(1, Ordering::Relaxed);
-        // Pop under the lock, but run the initializer outside it: allocation
-        // can take arbitrarily long and must not stall other leases.
-        let buffer = self.inner.lock_idle().pop().unwrap_or_else(|| {
-            #[cfg(feature = "stats")]
-            self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-            (self.inner.init)()
-        });
+        // Two statements on purpose: binding `popped` to its own `let`
+        // drops the guard at the first semicolon, so the initializer below
+        // runs *outside* the lock — allocation can take arbitrarily long
+        // and must not stall other leases. (Chained into one
+        // `lock_idle().pop().unwrap_or_else(init)` statement, the guard
+        // temporary would live to the end of it, straight through the
+        // initializer.)
+        let popped = self.inner.lock_idle().pop();
+        let buffer = match popped {
+            Some(buffer) => buffer,
+            None => {
+                #[cfg(feature = "stats")]
+                self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+                (self.inner.init)()
+            }
+        };
         SharedPooled {
             buffer: Some(buffer),
             inner: Arc::clone(&self.inner),
