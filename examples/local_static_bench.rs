@@ -213,10 +213,7 @@ fn parallel(n: usize, tasks: usize, rounds: usize) {
             .map(|_| {
                 (0..tasks)
                     .into_par_iter()
-                    .map_init(
-                        || vec![0.0; n],
-                        |buf, task| black_box(work(buf, task)),
-                    )
+                    .map_init(|| vec![0.0; n], |buf, task| black_box(work(buf, task)))
                     .sum::<f64>()
             })
             .sum::<f64>()

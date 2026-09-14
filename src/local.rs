@@ -134,7 +134,10 @@ fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 fn slot_for<'s>(reg: &'s mut Registry, id: usize, live: &Arc<AtomicBool>) -> &'s mut Slot {
     if reg.slots.len() <= id {
         // First touch of this pool on this thread: grow to the dense id.
-        reg.slots.resize_with(id + 1, || Slot { live: Arc::clone(live), buf: None });
+        reg.slots.resize_with(id + 1, || Slot {
+            live: Arc::clone(live),
+            buf: None,
+        });
         return &mut reg.slots[id];
     }
     let slot = &mut reg.slots[id];
@@ -262,8 +265,7 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
     /// [`with_reset`](ThreadLocalPool::with_reset) off
     /// [`new`](ThreadLocalPool::new)) before cloning or sharing handles.
     pub fn with_reset(mut self, reset: impl Fn(&mut T) + Send + Sync + 'static) -> Self {
-        let inner = Arc::get_mut(&mut self.inner)
-            .expect("freshly built pool is uniquely owned");
+        let inner = Arc::get_mut(&mut self.inner).expect("freshly built pool is uniquely owned");
         inner.reset = Some(Box::new(reset));
         self
     }
@@ -304,7 +306,9 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
                     // their owning pool, and ids are never reused. Park the
                     // foreign buffer back before failing loudly, so a bug
                     // here cannot silently eat another pool's scratch.
-                    with_registry(|reg| slot_for(reg, self.id, &self.inner.live).buf = Some(erased));
+                    with_registry(|reg| {
+                        slot_for(reg, self.id, &self.inner.live).buf = Some(erased)
+                    });
                     panic!("ThreadLocalPool slot holds a buffer of the wrong type");
                 }
             },
@@ -366,9 +370,9 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
             // Safety of the downcast: slots are written only by their owning
             // pool, and ids are never reused, so this pool's slot always
             // holds this pool's `T`. Same invariant as in `get`.
-            let typed = buffer.downcast_mut::<T>().expect(
-                "ThreadLocalPool slot holds a buffer of the wrong type",
-            );
+            let typed = buffer
+                .downcast_mut::<T>()
+                .expect("ThreadLocalPool slot holds a buffer of the wrong type");
             reset(typed);
         }
         with_registry(|reg| slot_for(reg, self.id, &self.inner.live).buf = Some(buffer));
