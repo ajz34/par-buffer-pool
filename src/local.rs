@@ -351,6 +351,58 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
         })
     }
 
+    /// Takes this thread's parked buffer out of the pool, returning it as a
+    /// one-element [`Vec`] — or an empty one when this thread has nothing
+    /// parked (including never having leased at all).
+    ///
+    /// Thread-scoped exactly like [`idle_len`](ThreadLocalPool::idle_len): a
+    /// thread-local pool has no global pile, so buffers parked on *other*
+    /// threads are not reachable from here. Collecting worker scratch on the
+    /// main thread therefore needs the guards themselves (send them back
+    /// mid-lease and [`into_inner`](LocalPooled::into_inner) them);
+    /// worker-parked buffers live on in their slots until that thread leases
+    /// again, the pool is dropped, or the thread exits.
+    ///
+    /// The reset hook registered with
+    /// [`with_reset`](ThreadLocalPool::with_reset) does *not* run — it
+    /// belongs to the return path, and this buffer is leaving the pool (same
+    /// semantics as [`into_inner`](LocalPooled::into_inner)). The pool keeps
+    /// working: this thread's next lease finds an empty slot and runs the
+    /// initializer.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use par_buffer_pool::ThreadLocalPool;
+    /// let pool = ThreadLocalPool::new(|| vec![0u8; 1024]);
+    /// drop(pool.get()); // parks on this thread
+    /// let drained: Vec<Vec<u8>> = pool.drain();
+    /// assert_eq!(drained.len(), 1);
+    /// assert_eq!(pool.idle_len(), 0);
+    /// assert_eq!(pool.drain().len(), 0); // nothing further parked here
+    /// ```
+    pub fn drain(&self) -> Vec<T> {
+        // `get_mut`, not `slot_for`: like `idle_len`, draining must not
+        // create a slot. The sweep inside `with_registry` has already
+        // dropped the buffer if the pool is dead.
+        let leased =
+            with_registry(|reg| reg.slots.get_mut(self.id).and_then(|slot| slot.buf.take()));
+        match leased {
+            Some(erased) => match erased.downcast::<T>() {
+                Ok(boxed) => vec![*boxed],
+                Err(erased) => {
+                    // Unreachable by construction (same invariant as `get`);
+                    // park the foreign buffer back before failing loudly.
+                    with_registry(|reg| {
+                        slot_for(reg, self.id, &self.inner.live).buf = Some(erased)
+                    });
+                    panic!("ThreadLocalPool slot holds a buffer of the wrong type");
+                }
+            },
+            None => Vec::new(),
+        }
+    }
+
     /// Lease and allocation counters; see [`PoolStats`]. Same contract and
     /// same `stats` feature gate as
     /// [`BufferPool::stats`](crate::BufferPool::stats): the counters are

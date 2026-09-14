@@ -8,6 +8,7 @@
 //! ([`crate::local`]) and the crate-level [choosing guide](crate#which-pool).
 
 use std::fmt;
+use std::mem;
 use std::ops::{Deref, DerefMut};
 #[cfg(feature = "stats")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -225,6 +226,66 @@ impl<'a, T> BufferPool<'a, T> {
     /// Number of idle buffers currently parked in the pool.
     pub fn idle_len(&self) -> usize {
         self.inner.lock_idle().len()
+    }
+
+    /// Removes every idle buffer from the pool, leaving it empty, and
+    /// returns them as a [`Vec`] in the order they were parked.
+    ///
+    /// This is the explicit way to reclaim or hand off pooled storage while
+    /// the pool lives on — typically called from one thread between parallel
+    /// phases, once every guard has been dropped. (The passive alternatives
+    /// are [`with_max_idle`](BufferPool::with_max_idle), which drops
+    /// overflow on *return*, and dropping the pool itself.)
+    ///
+    /// Outstanding leases are not affected: buffers checked out at this
+    /// moment are not in the pile, and they simply park again when their
+    /// guards drop. The reset hook registered with
+    /// [`with_reset`](BufferPool::with_reset) does *not* run — it belongs to
+    /// the return path, and these buffers are leaving the pool (same
+    /// semantics as [`SharedPooled::into_inner`]). The pool keeps working
+    /// afterwards: its next lease finds it empty and runs the initializer.
+    ///
+    /// On a [`ThreadLocalPool`](crate::ThreadLocalPool) the same method is
+    /// thread-scoped: there is no shared pile, so it can only take the
+    /// calling thread's parked buffer.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use par_buffer_pool::BufferPool;
+    /// let pool = BufferPool::new(|| vec![0u8; 1024]);
+    /// let holders: Vec<_> = (0..4).map(|_| pool.get()).collect();
+    /// drop(holders); // four buffers parked
+    /// let drained: Vec<Vec<u8>> = pool.drain();
+    /// assert_eq!(drained.len(), 4);
+    /// assert_eq!(pool.idle_len(), 0); // empty; the next lease allocates fresh
+    /// ```
+    ///
+    /// The typical phase shape: workers lease, fill, and return scratch;
+    /// afterwards one call on the main thread takes the whole pile back as
+    /// owned buffers.
+    ///
+    /// ```
+    /// # use par_buffer_pool::BufferPool;
+    /// # use rayon::prelude::*;
+    /// let pool = BufferPool::new(|| vec![0u8; 16]);
+    ///
+    /// (0..8u8).into_par_iter().for_each(|i| {
+    ///     let mut buf = pool.get();
+    ///     buf.fill(i);
+    /// }); // every guard returned: the pile holds all the pool's buffers
+    ///
+    /// let pile: Vec<Vec<u8>> = pool.drain();
+    /// assert!(!pile.is_empty()); // rayon decides how many were allocated
+    /// assert!(pile.iter().all(|buf| buf.len() == 16));
+    /// assert!(pile.iter().all(|buf| buf.iter().all(|&b| b == buf[0])));
+    /// assert_eq!(pool.idle_len(), 0);
+    /// ```
+    pub fn drain(&self) -> Vec<T> {
+        // Swapping in an empty `Vec` needs no `T` bound: only the pile
+        // itself is defaulted. The initializer is not involved, so this can
+        // stay a single locked step, like a `pop`.
+        mem::take(&mut *self.inner.lock_idle())
     }
 
     /// Lease and allocation counters; see [`PoolStats`].

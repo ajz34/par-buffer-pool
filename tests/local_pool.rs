@@ -175,6 +175,70 @@ fn nested_leases_allocate_fresh_instead_of_panicking() {
 }
 
 #[test]
+fn drain_takes_this_threads_parked_buffer_only() {
+    // Thread-scoped like `idle_len`: there is no global pile to drain.
+    let pool = ThreadLocalPool::new(|| vec![0u8; 8]);
+    assert_eq!(pool.drain().len(), 0, "nothing parked yet");
+
+    thread::scope(|s| {
+        s.spawn(|| {
+            drop(pool.get()); // parked on the worker thread, left there
+        });
+    });
+    assert_eq!(
+        pool.drain().len(),
+        0,
+        "another thread's parked buffer is not ours to take (it was \
+         reclaimed at that thread's exit)"
+    );
+
+    // This thread's own round trip drains fine.
+    drop(pool.get());
+    let stats_before = pool.stats();
+    let drained = pool.drain();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0], vec![0u8; 8]);
+    assert_eq!(pool.idle_len(), 0, "empty afterwards");
+    assert_eq!(pool.drain().len(), 0, "draining an empty slot is fine");
+    assert_eq!(
+        pool.stats(),
+        stats_before,
+        "drain is not a lease or an allocation"
+    );
+
+    // still a working pool: the next lease finds an empty slot and allocates
+    let fresh = pool.get();
+    assert_eq!(fresh[0], 0, "a freshly initialized buffer");
+    drop(fresh);
+    assert_eq!(pool.stats().allocations, stats_before.allocations + 1);
+}
+
+#[test]
+fn drain_skips_the_reset_hook() {
+    // 'static initializer: count through an Arc (same bound as the init).
+    let resets = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&resets);
+    let pool = ThreadLocalPool::new(|| vec![1.0f64; 4]).with_reset(move |buf| {
+        buf.fill(0.0);
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+
+    drop(pool.get()); // returned through the hook (reset #1)
+    let resets_after_return = resets.load(Ordering::SeqCst);
+
+    let drained = pool.drain();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        resets.load(Ordering::SeqCst),
+        resets_after_return,
+        "drain takes the buffer out; the return-path hook does not run"
+    );
+
+    drop(pool.get()); // parks through the hook as usual afterwards
+    assert_eq!(resets.load(Ordering::SeqCst), resets_after_return + 1);
+}
+
+#[test]
 fn sequential_leases_recycle_one_buffer() {
     let pool = ThreadLocalPool::new(|| vec![0u32; 64]);
     for k in 0..100 {

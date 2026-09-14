@@ -68,8 +68,9 @@
 //! ## Which pool?
 //!
 //! Both pools share one API shape — `new` / `get` (a guard) / `with` /
-//! `put` / `into_inner` / `with_reset` / `stats` — so switching between them
-//! is mostly a type swap. They differ in mechanism, and the mechanism shows
+//! `put` / `into_inner` / `drain` / `with_reset` / `stats` — so switching
+//! between them is mostly a type swap. They differ in mechanism, and the
+//! mechanism shows
 //! up in exactly one place: **many small tasks at high worker counts favor
 //! [`ThreadLocalPool`]; everything else is a feature choice.**
 //!
@@ -178,7 +179,11 @@
 //! `with_max_idle` caps how many are kept. [`ThreadLocalPool`] needs no cap:
 //! each thread parks at most one buffer per pool by construction, and
 //! dropped pools have their parked buffers reclaimed (see the
-//! [choosing guide](#which-pool)).
+//! [choosing guide](#which-pool)). To take parked buffers back out
+//! explicitly, `drain` moves them into a `Vec` — [`BufferPool`]'s whole
+//! pile at once, or [`ThreadLocalPool`]'s single buffer on the calling
+//! thread (thread-scoped, like `idle_len`) — leaving the pool empty but
+//! fully usable.
 //!
 //! ## Non-`'static` initializers (`BufferPool` only)
 //!

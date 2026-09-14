@@ -141,6 +141,77 @@ fn max_idle_caps_parked_buffers() {
 }
 
 #[test]
+fn drain_empties_the_pool_into_a_vec() {
+    // Hold three leases at once and return them: sequential get/drop cycles
+    // would just recycle one buffer (it parks and is re-leased immediately).
+    let pool = BufferPool::new(|| vec![0u8; 8]);
+    let holders: Vec<_> = (0..3)
+        .map(|i| {
+            let mut buf = pool.get();
+            buf[0] = i as u8;
+            buf
+        })
+        .collect();
+    drop(holders); // three buffers parked, in this drop order
+    assert_eq!(pool.idle_len(), 3);
+    let stats_before = pool.stats();
+
+    let drained: Vec<Vec<u8>> = pool.drain();
+    assert_eq!(
+        drained.iter().map(|b| b[0]).collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "drain yields the parked buffers, in parking order"
+    );
+    assert_eq!(pool.idle_len(), 0, "the pool is empty afterwards");
+    assert_eq!(pool.drain().len(), 0, "draining an empty pool is fine");
+    assert_eq!(
+        pool.stats(),
+        stats_before,
+        "drain is not a lease/allocation"
+    );
+
+    // still a working pool: the next lease finds it empty and allocates
+    let fresh = pool.get();
+    assert_eq!(fresh[0], 0, "a freshly initialized buffer");
+    drop(fresh);
+    assert_eq!(pool.stats().allocations, stats_before.allocations + 1);
+}
+
+#[test]
+fn drain_skips_outstanding_leases_and_the_reset_hook() {
+    // The reset hook borrows a stack local: drain must leave it alone.
+    let resets = AtomicUsize::new(0);
+    let pool = BufferPool::new(|| vec![1.0f64; 4]).with_reset(|buf| {
+        buf.fill(0.0);
+        resets.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let held = pool.get(); // outstanding for the whole test (not drainable)
+    let mut returned = pool.get(); // a second buffer, parked mid-test
+    returned.fill(8.0);
+    drop(returned); // return path: hook #1
+    let resets_after_return = resets.load(Ordering::SeqCst);
+
+    let drained = pool.drain();
+    assert_eq!(drained.len(), 1, "the outstanding lease is not in the pile");
+    assert_eq!(
+        drained[0],
+        vec![0.0; 4],
+        "parked after its return-time reset"
+    );
+    assert_eq!(
+        resets.load(Ordering::SeqCst),
+        resets_after_return,
+        "drain takes buffers out; the return-path hook does not run"
+    );
+    assert_eq!(pool.idle_len(), 0);
+
+    drop(held); // parks after the drain, through the hook as usual
+    assert_eq!(pool.idle_len(), 1);
+    assert_eq!(resets.load(Ordering::SeqCst), resets_after_return + 1);
+}
+
+#[test]
 fn cloned_handles_share_state() {
     let pool = BufferPool::new(|| vec![0u16; 4]);
     let clone = pool.clone();

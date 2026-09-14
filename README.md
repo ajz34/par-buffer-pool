@@ -73,7 +73,7 @@ scope guard.
 ## Which pool?
 
 Both pools share one API shape — `new` / `get` (a guard) / `with` / `put` /
-`into_inner` / `with_reset` / `stats` — so switching is mostly a type swap.
+`into_inner` / `drain` / `with_reset` / `stats` — so switching is mostly a type swap.
 The difference is the lease mechanism, and it shows up in exactly one place:
 **many small tasks at high worker counts favor `ThreadLocalPool`; everything
 else is a feature choice.**
@@ -88,6 +88,7 @@ else is a feature choice.**
 | After the pool is dropped | buffers freed with the pool | reclaimed on each thread's next pool interaction, or at thread exit (never unbounded) |
 | Idle cap | `with_max_idle` | not needed: each thread parks at most one buffer |
 | `idle_len` | global parked count | this thread's parked count (0 or 1) |
+| `drain` | moves the whole idle pile out | moves this thread's parked buffer (0 or 1) |
 
 (Lease costs measured on a 16-core desktop CPU with glibc, default features;
 see `examples/local_static_bench.rs` for the full matrix and the caveat that
@@ -103,6 +104,7 @@ orderings should be re-measured on target hardware.)
 | `Pool::with(f)` | Closure-based checkout of the same mechanism. |
 | `guard.into_inner()` | Detach the buffer when it *is* the result (not recycled). |
 | `Pool::put(buf)` | Manual return for detached/raw buffers. |
+| `Pool::drain()` | Empty the pool into a `Vec` of buffers — `BufferPool`: the whole idle pile; `ThreadLocalPool`: this thread's slot. Reset hooks do not run; the pool keeps working. |
 | `Pool::with_reset(f)` | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
 | `BufferPool::with_max_idle(n)` | Cap idle buffers; returns beyond the cap are dropped. (`ThreadLocalPool` needs no cap.) |
 | `Pool::stats()` | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
@@ -182,10 +184,10 @@ runnable (`cargo run --release --example <name>`):
 
 `cargo test` covers the guard semantics of both pools (scope exit, early
 return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
-hooks, idle caps, handle cloning, nested leases, reclamation of dropped
-pools' parked buffers, non-`'static` initializers under
-`std::thread::scope`, and rayon stress tests driving 20 000 leases through
-both pools.
+hooks, idle caps, draining (whole pile vs thread-scoped slot), handle
+cloning, nested leases, reclamation of dropped pools' parked buffers,
+non-`'static` initializers under `std::thread::scope`, and rayon stress
+tests driving 20 000 leases through both pools.
 
 ## License
 
