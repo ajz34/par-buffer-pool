@@ -159,7 +159,6 @@ fn slot_for<'s>(reg: &'s mut Registry, id: usize, live: &Arc<AtomicBool>) -> &'s
 /// # {
 /// let stats = pool.stats();
 /// assert_eq!(stats.leases, 64);
-/// assert!(stats.allocations <= rayon::current_num_threads()); // ≈ one per worker
 /// # }
 /// ```
 pub struct ThreadLocalPool<T> {

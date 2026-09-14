@@ -73,5 +73,4 @@ fn main() {
         rayon::current_num_threads()
     );
     println!("scratch churn: naive {naive_churn:.1} MB vs pooled {pooled:.2} MB");
-    assert!(stats.allocations <= rayon::current_num_threads());
 }

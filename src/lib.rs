@@ -36,7 +36,7 @@
 //!   to forget.**
 //! - The pool only allocates a new buffer when the relevant slot is
 //!   momentarily empty, so the buffer count converges to the peak number of
-//!   concurrently outstanding leases (≈ the number of worker threads).
+//!   concurrently outstanding leases.
 //!
 //! ## Quick start
 //!
@@ -59,7 +59,6 @@
 //!
 //! let stats = pool.stats();
 //! assert_eq!(stats.leases, 64); // every task took a lease
-//! assert!(stats.allocations <= rayon::current_num_threads()); // ≈ one per worker
 //! ```
 //!
 //! The same shape works verbatim with [`std::thread::scope`], async runtimes,

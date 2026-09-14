@@ -49,7 +49,9 @@ fn main() {
 
     println!("encoded {BLOBS} blobs into {total_len} hex chars");
 
-    // Peak scratch is bounded by ~nthreads buffers, not ntasks.
+    // The allocation count depends on scheduling (rayon assigns jobs, not
+    // resources, to threads) — for this workload it typically lands near the
+    // worker count, far below ntasks.
     let nthreads = rayon::current_num_threads();
     let stats = hex_pool.stats();
     println!(
@@ -59,5 +61,4 @@ fn main() {
         reuse = stats.reuses(),
     );
     assert_eq!(stats.leases, BLOBS);
-    assert!(stats.allocations <= nthreads);
 }

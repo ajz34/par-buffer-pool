@@ -124,7 +124,7 @@ runnable (`cargo run --release --example <name>`):
 | Example | Pattern |
 |---|---|
 | [`rayon_scratch`] | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
-| [`pair_scores`] | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to `O(nthreads)`. |
+| [`pair_scores`] | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to a near-constant pooled count. |
 | [`detach_collect`] | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
 | [`size_buckets`] | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
 | [`scoped_threads`] | No rayon: `std::thread::scope`, cloned handles, an initializer borrowing stack-local config, and a reset hook. |
@@ -184,8 +184,8 @@ runnable (`cargo run --release --example <name>`):
 return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
 hooks, idle caps, handle cloning, nested leases, reclamation of dropped
 pools' parked buffers, non-`'static` initializers under
-`std::thread::scope`, and rayon stress tests asserting
-`allocations ≤ nthreads` across 20 000 leases.
+`std::thread::scope`, and rayon stress tests driving 20 000 leases through
+both pools.
 
 ## License
 
