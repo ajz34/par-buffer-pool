@@ -57,6 +57,10 @@ name = "drain_reduce"
 doc-scrape-examples = true
 
 [[example]]
+name = "non_static_init"
+doc-scrape-examples = true
+
+[[example]]
 name = "alloc_bench"
 doc-scrape-examples = false
 

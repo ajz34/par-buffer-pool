@@ -8,6 +8,13 @@
 //!   any lease. ([`SharedPooled`] guard, `prelude`.)
 //! - [`ThreadLocalPool`] — one slot per worker thread; leases touch no lock
 //!   and no shared cache line. ([`LocalPooled`] guard.)
+//! - **Initializers that borrow.** [`BufferPool`]'s initializer — and its
+//!   reset hook — are bounded by the pool's lifetime `'a`, not `'static`:
+//!   capture plain stack locals (a dimensions tuple, a per-run preset) with
+//!   no `move`, no `Clone`, no `Arc`, and the borrowed data stays owned by
+//!   its owner. See
+//!   [Non-`'static` initializers](#non-static-initializers-bufferpool-only)
+//!   and the `non_static_init` example.
 //!
 //! Both exist because of a pattern that shows up in every parallel codebase:
 //! a loop over many small work items where every item needs the same kind of
@@ -141,6 +148,7 @@
 //! |---|---|
 //! | `rayon_scratch` | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
 //! | `drain_reduce` | Reduction without `fold`: pooled `f64` accumulators collect partial sums in a plain parallel `for_each`; `drain` hands them back for the final combine. |
+//! | `non_static_init` | The `'a` feature: initializer and reset hook borrow plain stack locals (an EQ preset copied into every fresh buffer) — no `'static`, no `move`, no `Clone`, and the borrowed data stays owned by its owner. |
 //! | `pair_scores` | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to a near-constant pooled count. |
 //! | `detach_collect` | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
 //! | `size_buckets` | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
@@ -262,6 +270,11 @@
 //!     }
 //! }); // guards returned; pool dies with `dims`, no 'static bound anywhere
 //! ```
+//!
+//! The `non_static_init` example builds a full run around this: initializer
+//! and reset hook both borrow one stack-local EQ preset, and the borrowed
+//! data is still owned — and re-checked serially — by `main` after the
+//! parallel phase.
 //!
 //! ## Any buffer type, and views over it
 //!

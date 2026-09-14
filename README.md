@@ -30,6 +30,11 @@ let totals: Vec<f64> = (0..1000)
   `LocalPooled`), not a bare value; dropping the guard — normally, on an
   early return, or during a panic unwind — returns the buffer to the pool
   automatically.
+- **Initializers may borrow.** `BufferPool<'a, T>` bounds its initializer
+  (and reset hook) by a lifetime, not `'static`: capture plain stack locals
+  — a dimensions tuple, a per-run preset — with no `move`, no `Clone`, no
+  `Arc`, while the borrowed data stays owned by its owner. See
+  [`non_static_init`](examples/non_static_init.rs).
 - **Self-limiting memory.** The pool allocates only when the relevant slot
   is momentarily empty, so buffer count converges to peak concurrent leases
   (≈ worker count), instead of one big transient allocation per task.
@@ -118,6 +123,7 @@ runnable (`cargo run --release --example <name>`):
 |---|---|
 | [`rayon_scratch`] | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
 | [`drain_reduce`] | Reduction without `fold`: pooled `f64` accumulators collect partial sums in a plain parallel `for_each`; `drain` hands them back for the final combine. |
+| [`non_static_init`] | The `'a` feature: initializer and reset hook borrow plain stack locals (an EQ preset copied into every fresh buffer) — no `'static`, no `move`, no `Clone`, and the borrowed data stays owned by its owner. |
 | [`pair_scores`] | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to a near-constant pooled count. |
 | [`detach_collect`] | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
 | [`size_buckets`] | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
@@ -159,6 +165,7 @@ repository maintainer.
 [`ThreadLocalPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.ThreadLocalPool.html
 [`rayon_scratch`]: examples/rayon_scratch.rs
 [`drain_reduce`]: examples/drain_reduce.rs
+[`non_static_init`]: examples/non_static_init.rs
 [`pair_scores`]: examples/pair_scores.rs
 [`detach_collect`]: examples/detach_collect.rs
 [`size_buckets`]: examples/size_buckets.rs
