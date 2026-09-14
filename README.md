@@ -1,5 +1,7 @@
 # par-buffer-pool
 
+[![CI](https://github.com/ajz34/par-buffer-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/ajz34/par-buffer-pool/actions/workflows/ci.yml)
+
 A tiny, dependency-free, `#![forbid(unsafe_code)]` crate with **two buffer
 pools** with **RAII guards**, for reusing scratch buffers across parallel
 workers — rayon, scoped threads, or a single thread:
@@ -158,6 +160,13 @@ reference: the API tour, per-item documentation with scraped usage examples
 from [`examples/`](examples), design notes, and the testing overview all
 live there. The docs.rs build also renders the private modules, so the
 internals are reviewable without cloning the source.
+
+## MSRV
+
+The minimum supported Rust version is **1.66** (`rust-version` in
+`Cargo.toml`), verified by the CI matrix. The dev-dependency lockfile pins
+`rayon` 1.10, whose own MSRV (1.63) is compatible — newer rayon releases
+require rustc 1.80. The library itself has no dependencies at all.
 
 ## License
 
