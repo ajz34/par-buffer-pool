@@ -73,7 +73,8 @@ scope guard.
 ## Which pool?
 
 Both pools share one API shape — `new` / `get` (a guard) / `with` / `put` /
-`into_inner` / `drain` / `with_reset` / `stats` — so switching is mostly a type swap.
+`into_inner` / `with_reset` / `stats`, plus `with_max_idle` and `drain` on
+[`BufferPool`] only — so switching is mostly a type swap.
 The difference is the lease mechanism, and it shows up in exactly one place:
 **many small tasks at high worker counts favor `ThreadLocalPool`; everything
 else is a feature choice.**
@@ -88,7 +89,7 @@ else is a feature choice.**
 | After the pool is dropped | buffers freed with the pool | reclaimed on each thread's next pool interaction, or at thread exit (never unbounded) |
 | Idle cap | `with_max_idle` | not needed: each thread parks at most one buffer |
 | `idle_len` | global parked count | this thread's parked count (0 or 1) |
-| `drain` | moves the whole idle pile out | moves this thread's parked buffer (0 or 1) |
+| `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | none: other threads' slots are unreachable (pool drop / thread exit reclaims) |
 
 (Lease costs measured on a 16-core desktop CPU with glibc, default features;
 see `examples/local_static_bench.rs` for the full matrix and the caveat that
@@ -104,7 +105,7 @@ orderings should be re-measured on target hardware.)
 | `Pool::with(f)` | Closure-based checkout of the same mechanism. |
 | `guard.into_inner()` | Detach the buffer when it *is* the result (not recycled). |
 | `Pool::put(buf)` | Manual return for detached/raw buffers. |
-| `Pool::drain()` | Empty the pool into a `Vec` of buffers — `BufferPool`: the whole idle pile; `ThreadLocalPool`: this thread's slot. Reset hooks do not run; the pool keeps working. |
+| `BufferPool::drain()` | Empty the pool into a `Vec` of buffers — the whole idle pile, best effort: leases still out are silently not included and park again afterwards, so call it between phases, once every guard has been dropped. Reset hooks do not run; the pool keeps working. (`ThreadLocalPool` has none: per-thread slots are unreachable cross-thread.) |
 | `Pool::with_reset(f)` | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
 | `BufferPool::with_max_idle(n)` | Cap idle buffers; returns beyond the cap are dropped. (`ThreadLocalPool` needs no cap.) |
 | `Pool::stats()` | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
@@ -126,6 +127,7 @@ runnable (`cargo run --release --example <name>`):
 | Example | Pattern |
 |---|---|
 | [`rayon_scratch`] | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
+| [`drain_reduce`] | Reduction without `fold`: pooled `f64` accumulators collect partial sums in a plain parallel `for_each`; `drain` hands them back for the final combine. |
 | [`pair_scores`] | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to a near-constant pooled count. |
 | [`detach_collect`] | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
 | [`size_buckets`] | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
@@ -184,7 +186,8 @@ runnable (`cargo run --release --example <name>`):
 
 `cargo test` covers the guard semantics of both pools (scope exit, early
 return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
-hooks, idle caps, draining (whole pile vs thread-scoped slot), handle
+hooks, idle caps, `drain` (best-effort pile hand-back and its mid-phase
+caveat), handle
 cloning, nested leases, reclamation of dropped pools' parked buffers,
 non-`'static` initializers under `std::thread::scope`, and rayon stress
 tests driving 20 000 leases through both pools.
@@ -197,6 +200,7 @@ publication).
 [`BufferPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html
 [`ThreadLocalPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.ThreadLocalPool.html
 [`rayon_scratch`]: examples/rayon_scratch.rs
+[`drain_reduce`]: examples/drain_reduce.rs
 [`pair_scores`]: examples/pair_scores.rs
 [`detach_collect`]: examples/detach_collect.rs
 [`size_buckets`]: examples/size_buckets.rs

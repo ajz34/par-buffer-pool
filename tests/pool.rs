@@ -195,6 +195,9 @@ fn drain_skips_outstanding_leases_and_the_reset_hook() {
     drop(returned); // return path: hook #1
     let resets_after_return = resets.load(Ordering::SeqCst);
 
+    // Best effort by design: only the parked buffer is handed back, and the
+    // mid-phase drain that produced it is the caller's responsibility (see
+    // the drain docs). Nothing panics; nothing is lost track of.
     let drained = pool.drain();
     assert_eq!(drained.len(), 1, "the outstanding lease is not in the pile");
     assert_eq!(

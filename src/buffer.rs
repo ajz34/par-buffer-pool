@@ -241,22 +241,30 @@ impl<'a, T> BufferPool<'a, T> {
     /// returns them as a [`Vec`] in the order they were parked.
     ///
     /// This is the explicit way to reclaim or hand off pooled storage while
-    /// the pool lives on — typically called from one thread between parallel
-    /// phases, once every guard has been dropped. (The passive alternatives
-    /// are [`with_max_idle`](BufferPool::with_max_idle), which drops
-    /// overflow on *return*, and dropping the pool itself.)
+    /// the pool lives on. (The passive alternatives are
+    /// [`with_max_idle`](BufferPool::with_max_idle), which drops overflow on
+    /// *return*, and dropping the pool itself.)
     ///
-    /// Outstanding leases are not affected: buffers checked out at this
-    /// moment are not in the pile, and they simply park again when their
-    /// guards drop. The reset hook registered with
+    /// **Call it between parallel phases, once every guard has been
+    /// dropped.** Buffers checked out at that moment are not in the pile and
+    /// therefore not in the returned [`Vec`]: they park again only when
+    /// their guards drop, *after* the drain has already returned. Draining
+    /// mid-phase does not fail in any way — it silently hands back a
+    /// partial (possibly empty) pile and lets the pool refill as workers
+    /// return, which is almost never what the caller intended. The moment a
+    /// rayon `for_each`, a `thread::scope`, or any phase boundary ends is
+    /// exactly the right time; anything earlier is not.
+    ///
+    /// The reset hook registered with
     /// [`with_reset`](BufferPool::with_reset) does *not* run — it belongs to
     /// the return path, and these buffers are leaving the pool (same
     /// semantics as [`SharedPooled::into_inner`]). The pool keeps working
     /// afterwards: its next lease finds it empty and runs the initializer.
     ///
-    /// On a [`ThreadLocalPool`](crate::ThreadLocalPool) the same method is
-    /// thread-scoped: there is no shared pile, so it can only take the
-    /// calling thread's parked buffer.
+    /// [`ThreadLocalPool`](crate::ThreadLocalPool) has no `drain`: its
+    /// parked buffers sit in per-thread slots that no other thread can
+    /// reach, so there is no pile to hand back — dropping the pool (or the
+    /// parking thread exiting) is what reclaims them.
     ///
     /// # Example
     ///
@@ -289,6 +297,24 @@ impl<'a, T> BufferPool<'a, T> {
     /// assert!(pile.iter().all(|buf| buf.len() == 16));
     /// assert!(pile.iter().all(|buf| buf.iter().all(|&b| b == buf[0])));
     /// assert_eq!(pool.idle_len(), 0);
+    /// ```
+    ///
+    /// Taken one step further, `drain` is the combine step of a parallel
+    /// reduction — pooled accumulators hold the partial sums, `drain` hands
+    /// them back, `.sum()` finishes; see the `drain_reduce` example.
+    ///
+    /// The caveat, made executable: a lease that is still out is simply
+    /// absent — no panic, no error — and parks again afterwards.
+    ///
+    /// ```
+    /// # use par_buffer_pool::BufferPool;
+    /// let pool = BufferPool::new(|| vec![0u8; 8]);
+    /// let held = pool.get(); // checked out: not in the pile
+    /// drop(pool.get()); // a second buffer, parked
+    /// let drained = pool.drain(); // best effort: only the parked one
+    /// assert_eq!(drained.len(), 1);
+    /// drop(held); // parks after the drain, refill begins
+    /// assert_eq!(pool.idle_len(), 1);
     /// ```
     pub fn drain(&self) -> Vec<T> {
         // Swapping in an empty `Vec` needs no `T` bound: only the pile
@@ -326,7 +352,7 @@ impl<'a, T> BufferPool<'a, T> {
 }
 
 impl<'a, T> PoolInner<'a, T> {
-    /// Locks the idle stack, recovering from poisoning.
+    /// Locks the idle pile, recovering from poisoning.
     ///
     /// The lock only ever guards a `pop`/`push` of plain values, so a panic
     /// elsewhere can leave it poisoned but never leaves damaged data behind;

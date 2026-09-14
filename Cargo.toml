@@ -42,6 +42,9 @@ name = "size_buckets"
 name = "scoped_threads"
 
 [[example]]
+name = "drain_reduce"
+
+[[example]]
 name = "alloc_bench"
 
 [[example]]

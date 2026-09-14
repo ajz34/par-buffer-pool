@@ -68,9 +68,9 @@
 //! ## Which pool?
 //!
 //! Both pools share one API shape — `new` / `get` (a guard) / `with` /
-//! `put` / `into_inner` / `drain` / `with_reset` / `stats` — so switching
-//! between them is mostly a type swap. They differ in mechanism, and the
-//! mechanism shows
+//! `put` / `into_inner` / `with_reset` / `stats`, plus `with_max_idle` and
+//! `drain` on [`BufferPool`] only — so switching between them is mostly a
+//! type swap. They differ in mechanism, and the mechanism shows
 //! up in exactly one place: **many small tasks at high worker counts favor
 //! [`ThreadLocalPool`]; everything else is a feature choice.**
 //!
@@ -84,13 +84,14 @@
 //! | After the pool is dropped | buffers freed with the pool | reclaimed on each thread's next pool interaction, or at thread exit (never unbounded) |
 //! | Idle cap | `with_max_idle` | not needed: each thread parks at most one buffer |
 //! | `idle_len` | global parked count | this thread's parked count (0 or 1) |
+//! | `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | not offered: other threads' slots are unreachable (pool drop / thread exit reclaims) |
 //!
 //! Practical guidance:
 //!
 //! - Tasks in the tens-of-µs range or larger: the lease mechanism vanishes
 //!   into noise — pick by features. Need non-`'static` initializers, a
-//!   global idle cap, or buffers detached on one thread and recycled on
-//!   another? [`BufferPool`]. Want each worker to keep its own scratch
+//!   global idle cap, `drain`, or buffers detached on one thread and
+//!   recycled on another? [`BufferPool`]. Want each worker to keep its own scratch
 //!   forever with zero shared state? [`ThreadLocalPool`].
 //! - Many tasks in the single-digit µs range at many workers: prefer
 //!   [`ThreadLocalPool`] — a shared mutex hit by millions of lease-pairs per
@@ -180,10 +181,13 @@
 //! each thread parks at most one buffer per pool by construction, and
 //! dropped pools have their parked buffers reclaimed (see the
 //! [choosing guide](#which-pool)). To take parked buffers back out
-//! explicitly, `drain` moves them into a `Vec` — [`BufferPool`]'s whole
-//! pile at once, or [`ThreadLocalPool`]'s single buffer on the calling
-//! thread (thread-scoped, like `idle_len`) — leaving the pool empty but
-//! fully usable.
+//! explicitly, [`BufferPool`]'s `drain` moves the whole idle pile into a
+//! `Vec`, leaving the pool empty but fully usable. It is best-effort by
+//! design: leases still out are silently not included and park again after
+//! the drain returns, so call it between phases, once every guard has been
+//! dropped. [`ThreadLocalPool`] has no `drain` — its parked buffers sit in
+//! per-thread slots no other thread can reach, and are reclaimed when the
+//! pool is dropped or the parking thread exits.
 //!
 //! ## Non-`'static` initializers (`BufferPool` only)
 //!
