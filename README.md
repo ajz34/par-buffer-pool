@@ -162,8 +162,8 @@ internals are reviewable without cloning the source.
 ## License
 
 Dual-licensed, at your option: the MIT License or the Apache License,
-Version 2.0 (`license = "MIT OR Apache-2.0"` in `Cargo.toml`). Full license
-texts are added to the repository on first publication.
+Version 2.0 (`license = "MIT OR Apache-2.0"` in `Cargo.toml`). Full texts:
+[LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
 
 ## Provenance
 
