@@ -95,20 +95,7 @@ else is a feature choice.**
 see `examples/local_static_bench.rs` for the full matrix and the caveat that
 orderings should be re-measured on target hardware.)
 
-## API tour
-
-| Item | What it does |
-|---|---|
-| `Pool::new(init)` | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty. |
-| `Pool::get()` | Lease a buffer as a guard (`SharedPooled<T>` / `LocalPooled<T>`, Deref/DerefMut to `T`). |
-| guard drop | Return the buffer — on scope exit, early return, or panic unwind. |
-| `Pool::with(f)` | Closure-based checkout of the same mechanism. |
-| `guard.into_inner()` | Detach the buffer when it *is* the result (not recycled). |
-| `Pool::put(buf)` | Manual return for detached/raw buffers. |
-| `BufferPool::drain()` | Empty the pool into a `Vec` of buffers — the whole idle pile, best effort: leases still out are silently not included and park again afterwards, so call it between phases, once every guard has been dropped. Reset hooks do not run; the pool keeps working. (`ThreadLocalPool` has none: per-thread slots are unreachable cross-thread.) |
-| `Pool::with_reset(f)` | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
-| `BufferPool::with_max_idle(n)` | Cap idle buffers; returns beyond the cap are dropped. (`ThreadLocalPool` needs no cap.) |
-| `Pool::stats()` | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
+## Semantics
 
 The pools never clear buffers on their own — accumulation buffers should use
 `with_reset(|b| b.fill(0.0))`, buffers fully overwritten by every task should
@@ -118,6 +105,9 @@ skip it.
 is `Send` under the same condition, so leases may even migrate between
 threads. `ThreadLocalPool<T>` is always `Send + Sync`; its guard is `Send`
 when `T: Send`.
+
+The full API tour — every method, one line each — lives on the
+[docs.rs page](https://docs.rs/par-buffer-pool).
 
 ## Examples
 
@@ -145,57 +135,25 @@ runnable (`cargo run --release --example <name>`):
   dev-dependency on the crate itself, so `cargo test` and
   `cargo run --example ...` need no extra flags.
 
-## Design notes
+## Documentation
 
-- **`BufferPool` locking.** One `Mutex` guards a `Vec`; the critical section
-  is `pop`/`push` (~tens of ns). New buffers are allocated outside the lock.
-  Contention only matters for low-microsecond tasks at high worker counts —
-  then coarsen tasks or use `ThreadLocalPool`.
-- **`ThreadLocalPool` mechanics.** One concrete `thread_local!` registry per
-  process maps dense pool ids to slots; a lease is a TLS access plus an
-  `Option::take` of a type-erased buffer (`Box<dyn Any + Send>`, downcast on
-  checkout — no `unsafe`). When a pool is dropped it flips a shared liveness
-  flag and bumps a global epoch; each thread's next registry access sweeps
-  its own dead slots (one `Acquire` load on the fast path), and thread exit
-  drops the whole registry — so parked buffers are reclaimed lazily but
-  never leak past the thread's life.
-- **Why not raw `thread_local!` + `RefCell`?** That is the classic
-  alternative — and `ThreadLocalPool` keeps its access cost while adding the
-  missing structure: a guard (no borrowed-flag panics across APIs), reset
-  hooks, detach-into-result, stats, reclamation after the pool is dropped,
-  and usage across library boundaries without exposing TLS internals.
-- **Why not rayon `for_each_init`/`map_init`?** Fine — and lock-free — when a
-  *single* loop owns all its scratch; but scratch cannot detach into results,
-  and the initializer re-runs per loop invocation, so loops called repeatedly
-  (per request, per frame, per batch) keep churning. Pools also serve plain
-  threads and nested parallelism.
-- **Poisoning.** The `BufferPool` lock never guards an invariant (just
-  values), so a poisoned mutex is recovered via `PoisonError::into_inner` —
-  no panic loops, no leaked idle buffers.
-- **Memory budgeting.** With the `stats` feature, `stats().allocations`
-  bounds concurrently outstanding leases: budget scratch as
-  `allocations × buffer_len × size_of::<T>()`. `with_max_idle` keeps bursts
-  from parking `BufferPool` buffers forever; `ThreadLocalPool` is bounded by
-  construction.
-- **Honest limits.** Recycled buffers carry stale contents (use
-  `with_reset`); a recycled small hot buffer from the shared pool pays a
-  cross-core cache-line transfer on its next use; tiny cheap buffers are
-  better left to the allocator.
-
-## Testing
-
-`cargo test` covers the guard semantics of both pools (scope exit, early
-return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
-hooks, idle caps, `drain` (best-effort pile hand-back and its mid-phase
-caveat), handle
-cloning, nested leases, reclamation of dropped pools' parked buffers,
-non-`'static` initializers under `std::thread::scope`, and rayon stress
-tests driving 20 000 leases through both pools.
+The [docs.rs page](https://docs.rs/par-buffer-pool) is the comprehensive
+reference: the API tour, per-item documentation with scraped usage examples
+from [`examples/`](examples), design notes, and the testing overview all
+live there. The docs.rs build also renders the private modules, so the
+internals are reviewable without cloning the source.
 
 ## License
 
-MIT OR Apache-2.0, at your option (license files to be added on first
-publication).
+Dual-licensed, at your option: the MIT License or the Apache License,
+Version 2.0 (`license = "MIT OR Apache-2.0"` in `Cargo.toml`). Full license
+texts are added to the repository on first publication.
+
+## Provenance
+
+Most of this crate — code, tests, examples, and documentation — was written
+by AI coding agents (GLM-5.3 and GLM-5.3-flash) at the direction of the
+repository maintainer.
 
 [`BufferPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html
 [`ThreadLocalPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.ThreadLocalPool.html

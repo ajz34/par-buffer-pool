@@ -4,8 +4,9 @@
 //! One [`Mutex`]-protected `Vec<T>` holds parked buffers, so any thread can
 //! satisfy any lease and buffers return to the pool from whichever thread
 //! drops them. Initializers may borrow non-`'static` data. For the
-//! lock-free, per-thread alternative, see [`ThreadLocalPool`]
-//! ([`crate::local`]) and the crate-level [choosing guide](crate#which-pool).
+//! lock-free, per-thread alternative, see
+//! [`ThreadLocalPool`](crate::ThreadLocalPool) ([`crate::local`]) and the
+//! crate-level [choosing guide](crate#which-pool).
 
 use std::fmt;
 use std::mem;
@@ -17,8 +18,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// Counters describing what a pool has done so far.
 ///
 /// Returned by [`BufferPool::stats`](crate::BufferPool::stats) and
-/// [`ThreadLocalPool::stats`](crate::ThreadLocalPool::stats), which
-/// are behind the `stats` feature; the type itself is always available, so
+/// [`ThreadLocalPool::stats`](crate::ThreadLocalPool::stats), which are
+/// behind the `stats` feature; the type itself is always available, so
 /// generic code can name it without feature gates. The difference
 /// `leases - allocations` is the number of leases served from recycled
 /// buffers.

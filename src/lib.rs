@@ -77,14 +77,19 @@
 //! | | [`BufferPool`] | [`ThreadLocalPool`] |
 //! |---|---|---|
 //! | Storage | one shared `Mutex<Vec<T>>` | one slot per worker thread (`thread_local!`) |
-//! | Lease cost | mutex lock/unlock pair (~26 ns, contended under many tiny tasks) | TLS access, no lock (~3 ns, never contended) |
+//! | Lease cost | mutex lock/unlock pair (~26 ns, contended under many tiny tasks) | TLS access, no lock (~9 ns, never contended) |
 //! | Initializer | may borrow non-`'static` data (`BufferPool<'a, T>`) | must be `'static` |
 //! | Buffers per pool | ≈ peak concurrent leases | ≈ worker threads, even if only two are ever busy |
 //! | Buffer movement | returns to the shared pile from any thread | parks on the thread that drops the guard; migrates if that is not where it was leased |
 //! | After the pool is dropped | buffers freed with the pool | reclaimed on each thread's next pool interaction, or at thread exit (never unbounded) |
 //! | Idle cap | `with_max_idle` | not needed: each thread parks at most one buffer |
 //! | `idle_len` | global parked count | this thread's parked count (0 or 1) |
-//! | `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | not offered: other threads' slots are unreachable (pool drop / thread exit reclaims) |
+//! | `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | none: other threads' slots are unreachable (pool drop / thread exit reclaims) |
+//!
+//! (Lease costs measured on a 16-core desktop CPU with glibc, default
+//! features; see `local_static_bench` under [Examples](#examples) for the
+//! full matrix and the caveat that orderings should be re-measured on
+//! target hardware.)
 //!
 //! Practical guidance:
 //!
@@ -99,6 +104,49 @@
 //!   not pooling at all* (see `local_static_bench` in the examples).
 //! - Mixed workloads can simply use both: they are independent types over
 //!   the same guard pattern.
+//!
+//! ## API tour
+//!
+//! | Item | What it does |
+//! |---|---|
+//! | [`new`](BufferPool::new) | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty. |
+//! | [`get`](BufferPool::get) | Lease a buffer as a guard ([`SharedPooled`] / [`LocalPooled`], [`std::ops::Deref`] / [`std::ops::DerefMut`] to `T`). |
+//! | guard drop | Return the buffer — on scope exit, early return, or panic unwind. |
+//! | [`with`](BufferPool::with) | Closure-based checkout of the same mechanism. |
+//! | `into_inner` | Detach the buffer when it *is* the result (not recycled). |
+//! | [`put`](BufferPool::put) | Manual return for detached/raw buffers. |
+//! | [`drain`](BufferPool::drain) | Empty the idle pile into a [`Vec`] — best effort: leases still out are silently not included and park again afterwards, so call it between phases, once every guard has been dropped. Reset hooks do not run; the pool keeps working. ([`ThreadLocalPool`] has none: per-thread slots are unreachable cross-thread.) |
+//! | [`with_reset`](BufferPool::with_reset) | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
+//! | [`with_max_idle`](BufferPool::with_max_idle) | Cap idle buffers; returns beyond the cap are dropped. ([`ThreadLocalPool`] needs no cap.) |
+//! | [`stats`](BufferPool::stats) | `leases` / `allocations` counters on both pools — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
+//!
+//! The pools never clear buffers on their own — accumulation buffers should
+//! use [`with_reset`](BufferPool::with_reset), buffers fully overwritten by
+//! every task should skip it.
+//!
+//! `BufferPool<'a, T>` is `Send + Sync` whenever `T: Send`; [`SharedPooled`]
+//! is `Send` under the same condition, so leases may even migrate between
+//! threads. [`ThreadLocalPool`] is always `Send + Sync`; its guard is `Send`
+//! when `T: Send`.
+//!
+//! ## Examples
+//!
+//! The repository's
+//! [`examples/` directory](https://github.com/ajz34/par-buffer-pool/tree/main/examples)
+//! is the documentation of record; each file is runnable
+//! (`cargo run --release --example <name>`), and the docs.rs build scrapes
+//! their call sites into the per-item docs of the API they use.
+//!
+//! | Example | Pattern |
+//! |---|---|
+//! | `rayon_scratch` | The canonical one: a scratch pool feeding a rayon loop (hex-encoding binary blobs), stats printout. |
+//! | `drain_reduce` | Reduction without `fold`: pooled `f64` accumulators collect partial sums in a plain parallel `for_each`; `drain` hands them back for the final combine. |
+//! | `pair_scores` | All-pairs tasks, one `O(n²)` scratch matrix per pair; shows churn drop from `O(ntasks)` buffers to a near-constant pooled count. |
+//! | `detach_collect` | Scratch vs. result in the same task: Mandelbrot strips detach via `into_inner` into the image, escape-time scratch recycles. |
+//! | `size_buckets` | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
+//! | `scoped_threads` | No rayon: [`std::thread::scope`], cloned handles, an initializer borrowing stack-local config, and a reset hook. |
+//! | `alloc_bench` | `fresh` vs `pooled` vs rayon `map_init` on 2 MiB buffers: wall time (best-of-N) plus allocation counts. |
+//! | `local_static_bench` | The two pools head-to-head against `fresh`/`map_init`/a hoisted floor: lease-cost microbench plus parallel tiny/huge task regimes. |
 //!
 //! ## The guard is the point
 //!
@@ -269,7 +317,10 @@
 //!   lease holders do microseconds-to-milliseconds of work, so contention
 //!   is negligible next to the allocation it removes — unless tasks are
 //!   tiny and workers numerous, which is [`ThreadLocalPool`]'s territory.
-//!   Allocation of new buffers happens *outside* the lock.
+//!   Allocation of new buffers happens *outside* the lock. And even
+//!   uncontended, a recycled shared-pool buffer tends to pay a cross-core
+//!   cache-line transfer on its next use — a second point for
+//!   [`ThreadLocalPool`] under heavy small-buffer churn.
 //! - **`BufferPool` poisoning.** The lock is only ever held for a
 //!   `pop`/`push`, so a poisoned mutex carries no damaged invariant; it is
 //!   recovered from with [`std::sync::PoisonError::into_inner`] rather than
@@ -293,6 +344,22 @@
 //!   which is what keeps their lease path free of reference counts.
 //! - **No `unsafe`.** Neither pool uses `MaybeUninit`, pinning, or raw
 //!   pointers; guards are plain owned values.
+//!
+//! ## Testing
+//!
+//! `cargo test` covers the guard semantics of both pools (scope exit, early
+//! return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
+//! hooks, idle caps, `drain` (best-effort pile hand-back and its mid-phase
+//! caveat), handle cloning, nested leases, reclamation of dropped pools'
+//! parked buffers, non-`'static` initializers under [`std::thread::scope`],
+//! and rayon stress tests driving 20 000 leases through both pools.
+//!
+//! ## Provenance
+//!
+//! Most of this crate — code, tests, examples, and documentation — was
+//! written by AI coding agents (GLM-5.3 and GLM-5.3-flash) under human
+//! direction; the [repository README](https://github.com/ajz34/par-buffer-pool)
+//! carries the same note alongside licensing details.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

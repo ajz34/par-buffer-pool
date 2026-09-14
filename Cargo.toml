@@ -6,6 +6,7 @@ rust-version = "1.66"
 license = "MIT OR Apache-2.0"
 description = "A tiny, dependency-free, thread-safe buffer pool with RAII guards, for reusing scratch buffers across parallel workers"
 readme = "README.md"
+repository = "https://github.com/ajz34/par-buffer-pool"
 keywords = ["pool", "buffer", "scratch", "rayon", "reuse"]
 categories = ["concurrency", "memory-management", "rust-patterns"]
 # there are intentionally no runtime dependencies
@@ -24,6 +25,13 @@ rayon = "1.8"
 # downstream users of the library itself.
 par-buffer-pool = { path = ".", features = ["stats"] }
 
+# The examples double as usage documentation: the docs.rs build configured
+# below scrapes their call sites into the per-item docs of the API they use.
+# `doc-scrape-examples = true` opts an example in and tells Cargo that
+# building dev-dependencies (rayon; the self-dependency enabling `stats`)
+# for `cargo doc` is fine — without it the examples are skipped as
+# "requiring dev-dependencies". The two microbenchmarks opt out: they
+# document performance, not usage.
 [[example]]
 name = "rayon_scratch"
 doc-scrape-examples = true
@@ -34,18 +42,36 @@ doc-scrape-examples = true
 
 [[example]]
 name = "detach_collect"
+doc-scrape-examples = true
 
 [[example]]
 name = "size_buckets"
+doc-scrape-examples = true
 
 [[example]]
 name = "scoped_threads"
+doc-scrape-examples = true
 
 [[example]]
 name = "drain_reduce"
+doc-scrape-examples = true
 
 [[example]]
 name = "alloc_bench"
+doc-scrape-examples = false
 
 [[example]]
 name = "local_static_bench"
+doc-scrape-examples = false
+
+# docs.rs build configuration (https://docs.rs/about/metadata):
+# 1. `all-features` documents the `stats`-gated API as well.
+# 2. `--document-private-items` renders the private `buffer`/`local` modules
+#    too, so the internals are reviewable from the published docs.
+# 3. `-Zrustdoc-scrape-examples` embeds `examples/` call sites into the docs
+#    of the items they use — a nightly-only rustdoc feature, hence routed
+#    through `cargo-args` (docs.rs always builds with nightly).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--document-private-items"]
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
