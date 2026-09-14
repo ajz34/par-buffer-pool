@@ -141,6 +141,16 @@ runnable (`cargo run --release --example <name>`):
   dev-dependency on the crate itself, so `cargo test` and
   `cargo run --example ...` need no extra flags.
 
+## Comparison
+
+How does this compare to `object-pool`, `opool`, or the pool inside quiche?
+The [`comparison` module on docs.rs](https://docs.rs/par-buffer-pool/latest/par_buffer_pool/comparison/)
+([source](src/comparison.md)) surveys the crates.io buffer- and object-pool
+landscape honestly — what each crate offers, what none of them offer, and
+where this crate differs (borrowed initializers, zero dependencies, no
+`unsafe` — and a clear list of what it is *not*: not an allocator, not an
+arena, not a connection pool).
+
 ## Documentation
 
 The [docs.rs page](https://docs.rs/par-buffer-pool) is the comprehensive

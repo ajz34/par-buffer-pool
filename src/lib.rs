@@ -313,6 +313,14 @@
 //!   panics. [`ThreadLocalPool`] keeps the access cost and adds the missing
 //!   structure.
 //!
+//! ## Compared with other crates
+//!
+//! The [`comparison`] module surveys crates.io's buffer- and object-pool
+//! crates — object-pool, opool, Cloudflare's buffer-pool, swimmer,
+//! lifeguard, lockfree-object-pool, syncpool, and the adjacent arenas,
+//! `bytes`, and connection pools — with an honest table of what each offers,
+//! what none of them offer, and where this crate differs.
+//!
 //! ## Feature flags
 //!
 //! - **`stats`** (off by default): per-pool lease/allocation counters,
@@ -382,6 +390,10 @@ mod local;
 
 pub use crate::buffer::{BufferPool, PoolStats, SharedPooled};
 pub use crate::local::{LocalPooled, ThreadLocalPool};
+
+/// Comparison documentation, written against the crates.io landscape.
+#[doc = include_str!("comparison.md")]
+pub mod comparison {}
 
 /// Convenience re-exports: both pools, their guards, and the stats type.
 ///
