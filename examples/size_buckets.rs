@@ -16,10 +16,10 @@
 //!
 //! Run with `cargo run --release --example size_buckets`.
 
-use par_buffer_pool::{BufferPool, Pooled};
+use par_buffer_pool::{BufferPool, SharedPooled};
 use rayon::prelude::*;
 
-type Lease = Pooled<'static, Vec<f64>>;
+type Lease = SharedPooled<'static, Vec<f64>>;
 
 /// One grow-only pool serving any requested length.
 struct AnySizeScratch {

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use par_buffer_pool::{BufferPool, Pooled};
+use par_buffer_pool::{BufferPool, SharedPooled};
 use rayon::prelude::*;
 
 fn assert_send<T: Send>() {}
@@ -17,7 +17,7 @@ fn assert_sync<T: Sync>() {}
 fn send_sync_when_t_is_send() {
     assert_send::<BufferPool<'static, Vec<f64>>>();
     assert_sync::<BufferPool<'static, Vec<f64>>>();
-    assert_send::<Pooled<'static, Vec<f64>>>();
+    assert_send::<SharedPooled<'static, Vec<f64>>>();
     // non-Send T is still usable single-threaded; the pool just is not Sync
     let rc_pool = BufferPool::new(|| Rc::new(7u32));
     assert_eq!(*rc_pool.get(), Rc::new(7u32));

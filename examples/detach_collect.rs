@@ -7,7 +7,7 @@
 //!   * a `Vec<f64>` of escape-time values — transient scratch, returned to
 //!     its pool automatically at scope end;
 //!   * a `Vec<u8>` strip of pixels — the *result*, detached with
-//!     [`Pooled::into_inner`](par_buffer_pool::Pooled::into_inner) so it is
+//!     [`SharedPooled::into_inner`](par_buffer_pool::SharedPooled::into_inner) so it is
 //!     moved, contents and all, straight into the image. No copy, no recycle.
 //!
 //! The stats make the split visible: the scratch pool shows heavy reuse, the

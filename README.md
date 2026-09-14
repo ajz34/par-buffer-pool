@@ -1,8 +1,13 @@
 # par-buffer-pool
 
-A tiny, dependency-free, thread-safe **buffer pool** with **RAII guards**, for
-reusing scratch buffers across parallel workers — rayon, scoped threads, or a
-single thread.
+A tiny, dependency-free, `#![forbid(unsafe_code)]` crate with **two buffer
+pools** with **RAII guards**, for reusing scratch buffers across parallel
+workers — rayon, scoped threads, or a single thread:
+
+- **[`BufferPool`]** — one shared, mutex-guarded pile; any thread can satisfy
+  any lease. Initializers may borrow non-`'static` data.
+- **[`ThreadLocalPool`]** — one slot per worker thread; leases touch no lock
+  and no shared cache line. Same API shape, `'static` initializers.
 
 ```rust
 use par_buffer_pool::BufferPool;
@@ -21,22 +26,21 @@ let totals: Vec<f64> = (0..1000)
     .collect();
 ```
 
-- **No `put` to forget.** [`BufferPool::get`] returns a *guard*, not a bare
-  value; dropping the guard — normally, on an early return, or during a panic
-  unwind — returns the buffer to the pool automatically.
-- **Self-limiting memory.** The pool allocates only when momentarily empty, so
-  buffer count converges to peak concurrent leases (≈ worker count), instead
-  of one big transient allocation per task.
-- **`Clone` handle, non-`'static` initializer.** Cheaply clone the pool into
-  worker closures or store it in a driver struct; the initializer may borrow
-  dimensions, config, anything local from the caller — no `'static`, no
-  cloning, no leaking.
-- **Zero dependencies, zero `unsafe`.** One `Mutex<Vec<T>>`, a closure, two
-  atomics. `#![forbid(unsafe_code)]`.
+- **No `put` to forget.** `get` returns a *guard* (`SharedPooled` /
+  `LocalPooled`), not a bare value; dropping the guard — normally, on an
+  early return, or during a panic unwind — returns the buffer to the pool
+  automatically.
+- **Self-limiting memory.** The pool allocates only when the relevant slot
+  is momentarily empty, so buffer count converges to peak concurrent leases
+  (≈ worker count), instead of one big transient allocation per task.
+- **`Clone` handles.** Cheaply clone a pool into worker closures or store it
+  in a driver struct; both are shared-state handles, like `Arc`.
+- **Zero dependencies, zero `unsafe`.** One `Mutex<Vec<T>>`, or one
+  `thread_local!` registry — a closure and two atomics each.
 
-It is the polished form of the `BufferPool` snippet that tends to get
-hand-copied into parallel codebases — the manual `get`/`put` dance around
-every closure, with the returns forgotten on some path.
+It is the polished form of the pool snippet that tends to get hand-copied
+into parallel codebases — the manual `get`/`put` dance around every closure,
+with the returns forgotten on some path.
 
 ## The problem
 
@@ -63,29 +67,54 @@ scratch_pool.put(scratch);
 ```
 
 which shifts the burden onto every caller, every branch, every panic path.
-`par-buffer-pool` is that idea with the failure modes removed: the checkout
-*is* a scope guard.
+This crate is that idea with the failure modes removed: the checkout *is* a
+scope guard.
+
+## Which pool?
+
+Both pools share one API shape — `new` / `get` (a guard) / `with` / `put` /
+`into_inner` / `with_reset` / `stats` — so switching is mostly a type swap.
+The difference is the lease mechanism, and it shows up in exactly one place:
+**many small tasks at high worker counts favor `ThreadLocalPool`; everything
+else is a feature choice.**
+
+| | [`BufferPool`] | [`ThreadLocalPool`] |
+|---|---|---|
+| Storage | one shared `Mutex<Vec<T>>` | one slot per worker thread (`thread_local!`) |
+| Lease cost | mutex pair ≈ 26 ns, contended under many tiny tasks | TLS access ≈ 9 ns, never contended |
+| Initializer | may borrow non-`'static` data (`BufferPool<'a, T>`) | must be `'static` |
+| Buffers per pool | ≈ peak concurrent leases | ≈ worker threads, even if only two are busy |
+| Buffer movement | returns to the shared pile from any thread | parks on the thread that drops the guard; migrates if that is not where it was leased |
+| After the pool is dropped | buffers freed with the pool | reclaimed on each thread's next pool interaction, or at thread exit (never unbounded) |
+| Idle cap | `with_max_idle` | not needed: each thread parks at most one buffer |
+| `idle_len` | global parked count | this thread's parked count (0 or 1) |
+
+(Lease costs measured on a 16-core desktop CPU with glibc, default features;
+see `examples/local_static_bench.rs` for the full matrix and the caveat that
+orderings should be re-measured on target hardware.)
 
 ## API tour
 
 | Item | What it does |
 |---|---|
-| [`BufferPool::new(init)`] | Build a pool; `init` runs lazily, only when a lease finds the pool empty. |
-| [`BufferPool::get()`] | Lease a buffer as a `Pooled<T>` guard (Deref/DerefMut to `T`). |
-| `Pooled` drop | Return the buffer — on scope exit, early return, or panic unwind. |
-| [`Pooled::into_inner()`] | Detach the buffer when it *is* the result (not recycled). |
-| [`BufferPool::put(buf)`] | Manual return for detached/raw buffers. |
-| [`BufferPool::with_reset(f)`] | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
-| [`BufferPool::with_max_idle(n)`] | Cap idle buffers; returns beyond the cap are dropped. |
-| [`BufferPool::stats()`] | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
-| `BufferPool: Clone` | Cheap shared-state handle (like `Arc`); guards keep the pool alive. |
+| `Pool::new(init)` | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty. |
+| `Pool::get()` | Lease a buffer as a guard (`SharedPooled<T>` / `LocalPooled<T>`, Deref/DerefMut to `T`). |
+| guard drop | Return the buffer — on scope exit, early return, or panic unwind. |
+| `Pool::with(f)` | Closure-based checkout of the same mechanism. |
+| `guard.into_inner()` | Detach the buffer when it *is* the result (not recycled). |
+| `Pool::put(buf)` | Manual return for detached/raw buffers. |
+| `Pool::with_reset(f)` | Run `f(&mut buf)` on every return, so leases start in a known state (e.g. zeroed). |
+| `BufferPool::with_max_idle(n)` | Cap idle buffers; returns beyond the cap are dropped. (`ThreadLocalPool` needs no cap.) |
+| `Pool::stats()` | `leases` / `allocations` counters — proof the pool works, and the number for memory budgeting. Behind the `stats` feature (off by default). |
 
-The pool never clears buffers on its own — accumulation buffers should use
+The pools never clear buffers on their own — accumulation buffers should use
 `with_reset(|b| b.fill(0.0))`, buffers fully overwritten by every task should
 skip it.
 
-`BufferPool<'a, T>` is `Send + Sync` whenever `T: Send`; `Pooled<'a, T>` is
-`Send` under the same condition, so leases may even migrate between threads.
+`BufferPool<'a, T>` is `Send + Sync` whenever `T: Send`; `SharedPooled<'a, T>`
+is `Send` under the same condition, so leases may even migrate between
+threads. `ThreadLocalPool<T>` is always `Send + Sync`; its guard is `Send`
+when `T: Send`.
 
 ## Examples
 
@@ -100,66 +129,75 @@ runnable (`cargo run --release --example <name>`):
 | [`size_buckets`] | Variable-size workloads: a grow-only pool (`clear` + `resize` per lease) and power-of-two size-class pools. |
 | [`scoped_threads`] | No rayon: `std::thread::scope`, cloned handles, an initializer borrowing stack-local config, and a reset hook. |
 | [`alloc_bench`] | `fresh` vs `pooled` vs rayon `map_init` on 2 MiB buffers: wall time (best-of-N) plus allocation counts. |
+| [`local_static_bench`] | The two pools head-to-head against `fresh`/`map_init`/a hoisted floor: lease-cost microbench plus parallel tiny/huge task regimes. |
 
 ## Feature flags
 
 - **`stats`** (off by default): per-pool lease/allocation counters via
-  [`BufferPool::stats()`] — `leases`, `allocations`, and `reuses()`. Costs one
-  relaxed atomic add per lease; enable it to verify that recycling is
-  happening or to budget scratch memory. The crate's own tests and examples
-  enable it automatically via a dev-dependency on the crate itself, so
-  `cargo test` and `cargo run --example ...` need no extra flags.
+  `stats()` — `leases`, `allocations`, and `reuses()`. Costs one relaxed
+  atomic add per lease on a shared cache line (for both pools); enable it to
+  verify that recycling is happening or to budget scratch memory. The
+  crate's own tests and examples enable it automatically via a
+  dev-dependency on the crate itself, so `cargo test` and
+  `cargo run --example ...` need no extra flags.
 
 ## Design notes
 
-- **Why not `thread_local!`?** It is the classic alternative and the classic
-  trap: generic thread-local scratch that borrows non-`'static` data is
-  famously awkward, and thread-locals persist for the life of the thread. A
-  shared pool has none of those problems and dies with its last handle.
-- **Why not per-thread slots (`Vec<Mutex<T>>` indexed by thread id)?** Fragile
-  sizing, idle buffers for absent threads, and no sharing across differently
-  shaped loops.
+- **`BufferPool` locking.** One `Mutex` guards a `Vec`; the critical section
+  is `pop`/`push` (~tens of ns). New buffers are allocated outside the lock.
+  Contention only matters for low-microsecond tasks at high worker counts —
+  then coarsen tasks or use `ThreadLocalPool`.
+- **`ThreadLocalPool` mechanics.** One concrete `thread_local!` registry per
+  process maps dense pool ids to slots; a lease is a TLS access plus an
+  `Option::take` of a type-erased buffer (`Box<dyn Any + Send>`, downcast on
+  checkout — no `unsafe`). When a pool is dropped it flips a shared liveness
+  flag and bumps a global epoch; each thread's next registry access sweeps
+  its own dead slots (one `Acquire` load on the fast path), and thread exit
+  drops the whole registry — so parked buffers are reclaimed lazily but
+  never leak past the thread's life.
+- **Why not raw `thread_local!` + `RefCell`?** That is the classic
+  alternative — and `ThreadLocalPool` keeps its access cost while adding the
+  missing structure: a guard (no borrowed-flag panics across APIs), reset
+  hooks, detach-into-result, stats, reclamation after the pool is dropped,
+  and usage across library boundaries without exposing TLS internals.
 - **Why not rayon `for_each_init`/`map_init`?** Fine — and lock-free — when a
   *single* loop owns all its scratch; but scratch cannot detach into results,
   and the initializer re-runs per loop invocation, so loops called repeatedly
   (per request, per frame, per batch) keep churning. Pools also serve plain
   threads and nested parallelism.
-- **Locking.** One `Mutex` guards a `Vec`; the critical section is `pop`/`push`
-  (~tens of ns). New buffers are allocated outside the lock. Contention only
-  matters for low-microsecond tasks — then coarsen tasks or use `map_init`.
-- **Poisoning.** The lock never guards an invariant (just values), so a
-  poisoned mutex is recovered via `PoisonError::into_inner` — no panic loops,
-  no leaked idle buffers.
-- **Memory budgeting.** With the `stats` feature, `stats().allocations` bounds
-  concurrently outstanding leases: budget scratch as
+- **Poisoning.** The `BufferPool` lock never guards an invariant (just
+  values), so a poisoned mutex is recovered via `PoisonError::into_inner` —
+  no panic loops, no leaked idle buffers.
+- **Memory budgeting.** With the `stats` feature, `stats().allocations`
+  bounds concurrently outstanding leases: budget scratch as
   `allocations × buffer_len × size_of::<T>()`. `with_max_idle` keeps bursts
-  from parking buffers forever.
-- **Honest limits.** Recycled buffers carry stale contents (use `with_reset`);
-  a recycled small hot buffer pays a cross-core cache-line transfer on its
-  next use; tiny cheap buffers are better left to the allocator.
+  from parking `BufferPool` buffers forever; `ThreadLocalPool` is bounded by
+  construction.
+- **Honest limits.** Recycled buffers carry stale contents (use
+  `with_reset`); a recycled small hot buffer from the shared pool pays a
+  cross-core cache-line transfer on its next use; tiny cheap buffers are
+  better left to the allocator.
 
 ## Testing
 
-`cargo test` covers the guard semantics (scope exit, early return, panic
-unwind, cross-thread drop), detach/re-pool, reset hooks, idle caps, handle
-cloning, non-`'static` initializers under `std::thread::scope`, and a rayon
-stress test asserting `allocations ≤ nthreads` across 20 000 leases.
+`cargo test` covers the guard semantics of both pools (scope exit, early
+return, panic unwind, cross-thread drop/migration), detach/re-pool, reset
+hooks, idle caps, handle cloning, nested leases, reclamation of dropped
+pools' parked buffers, non-`'static` initializers under
+`std::thread::scope`, and rayon stress tests asserting
+`allocations ≤ nthreads` across 20 000 leases.
 
 ## License
 
 MIT OR Apache-2.0, at your option (license files to be added on first
 publication).
 
-[`BufferPool::new(init)`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.new
-[`BufferPool::get()`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.get
-[`BufferPool::put(buf)`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.put
-[`BufferPool::with_reset(f)`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.with_reset
-[`BufferPool::with_max_idle(n)`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.with_max_idle
-[`BufferPool::stats()`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html#method.stats
-[`Pooled::into_inner()`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.Pooled.html#method.into_inner
+[`BufferPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.BufferPool.html
+[`ThreadLocalPool`]: https://docs.rs/par-buffer-pool/latest/par_buffer_pool/struct.ThreadLocalPool.html
 [`rayon_scratch`]: examples/rayon_scratch.rs
 [`pair_scores`]: examples/pair_scores.rs
 [`detach_collect`]: examples/detach_collect.rs
 [`size_buckets`]: examples/size_buckets.rs
 [`scoped_threads`]: examples/scoped_threads.rs
 [`alloc_bench`]: examples/alloc_bench.rs
+[`local_static_bench`]: examples/local_static_bench.rs

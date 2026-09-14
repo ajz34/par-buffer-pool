@@ -43,3 +43,6 @@ name = "scoped_threads"
 
 [[example]]
 name = "alloc_bench"
+
+[[example]]
+name = "local_static_bench"
