@@ -4,6 +4,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
@@ -287,27 +288,46 @@ fn dropping_the_pool_reclaims_parked_buffers_on_other_threads() {
         let counter = Arc::clone(&drops);
         ThreadLocalPool::new(move || Tracked(Arc::clone(&counter)))
     };
-
-    thread::scope(|s| {
-        s.spawn(|| {
-            drop(pool.get()); // parked on the worker thread
-        });
-    });
-    assert_eq!(drops.load(Ordering::SeqCst), 0, "parked, pool still alive");
-    drop(pool); // the worker's parked buffer is now unreachable except via TLS
-
-    // Any thread's next registry access sweeps its own dead slots.
     let other = ThreadLocalPool::new(|| ());
-    let _ = other.idle_len();
+
+    // The parking worker must stay alive for the whole test: a thread that
+    // exits drops its whole registry (the reclamation backstop), which
+    // would release the parked buffer without any sweep and race the
+    // asserts below. The worker also drops its own handle before
+    // signalling, so the `drop(pool)` on the main thread is the pool's
+    // *last* handle — the drop that flips the liveness flag and bumps the
+    // epoch. A fresh worker thread cannot do this sweeping either: the
+    // registry is per-thread, so only the parking thread's next registry
+    // access can sweep its own dead slot.
+    let (parked_tx, parked_rx) = mpsc::channel::<()>();
+    let (sweep_tx, sweep_rx) = mpsc::channel::<()>();
+    let (swept_tx, swept_rx) = mpsc::channel::<()>();
+    let worker_parker = pool.clone();
+    let worker_sweeper = other.clone(); // any handle wakes this thread's sweep
     thread::scope(|s| {
-        s.spawn(|| {
-            let _ = other.idle_len(); // the worker's sweep
+        s.spawn(move || {
+            drop(worker_parker.get()); // parked on this (still-alive) worker
+            drop(worker_parker); // main's handle is now the last one
+            parked_tx.send(()).unwrap();
+            sweep_rx.recv().unwrap(); // wait until the pool is dead
+            let _ = worker_sweeper.idle_len(); // any access sweeps this thread's dead slots
+            swept_tx.send(()).unwrap();
         });
+
+        parked_rx.recv().unwrap();
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "parked on a live thread while the pool lives"
+        );
+        drop(pool); // the last handle: liveness flips, DROP_EPOCH bumps
+        sweep_tx.send(()).unwrap();
+        swept_rx.recv().unwrap();
     });
     assert_eq!(
         drops.load(Ordering::SeqCst),
         1,
-        "worker reclaimed the dead pool's buffer"
+        "the parking thread's next registry access swept the dead pool's buffer"
     );
 }
 
