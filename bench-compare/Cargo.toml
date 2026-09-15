@@ -1,0 +1,16 @@
+[package]
+name = "bench-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+par-buffer-pool = { path = ".." } # default features: `stats` OFF, like a downstream user
+rayon = "1"
+object-pool = "0.6"
+opool = "0.2"
+swimmer = "0.3"
+lockfree-object-pool = "0.1"
+
+[profile.release]
+debug = false

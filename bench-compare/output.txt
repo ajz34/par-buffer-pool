@@ -1,0 +1,123 @@
+pool-bench2: available_parallelism = 32, rayon workers = 32, best of 5
+
+=== S: serial lease, 2000000 leases of 1 KiB Vec<u8>, near-zero work ===
+          fresh vec![0u8; N]:   26.88 ns/lease
+       hoisted local (floor):    2.24 ns/lease
+           raw thread_local!:    6.99 ns/lease
+        ours ThreadLocalPool:   10.31 ns/lease
+       ours BufferPool (get):   23.29 ns/lease
+ ours BufferPool (get_owned):   30.67 ns/lease
+             object-pool 0.6:   16.11 ns/lease
+              opool 0.2 Pool:   10.76 ns/lease
+         opool 0.2 LocalPool:    3.45 ns/lease
+       swimmer 0.3 (+resize):   12.60 ns/lease
+    lockfree-object-pool 0.1:    9.81 ns/lease
+              name: ns/lease:   (≈ cycles at 5.7 GHz)
+                       fresh:   26.88 ns  ≈  153 cycles
+                     hoisted:    2.24 ns  ≈   13 cycles
+                     raw TLS:    6.99 ns  ≈   40 cycles
+                  ours local:   10.31 ns  ≈   59 cycles
+                 ours shared:   23.29 ns  ≈  133 cycles
+           ours shared owned:   30.67 ns  ≈  175 cycles
+                 object-pool:   16.11 ns  ≈   92 cycles
+                  opool Pool:   10.76 ns  ≈   61 cycles
+             opool LocalPool:    3.45 ns  ≈   20 cycles
+                     swimmer:   12.60 ns  ≈   72 cycles
+                    lockfree:    9.81 ns  ≈   56 cycles
+
+=== S: serial lease, 300000 leases of 64 KiB Vec<u8>, near-zero work ===
+          fresh vec![0u8; N]:  241.21 ns/lease
+       hoisted local (floor):    2.24 ns/lease
+           raw thread_local!:    7.34 ns/lease
+        ours ThreadLocalPool:   10.26 ns/lease
+       ours BufferPool (get):   23.39 ns/lease
+ ours BufferPool (get_owned):   30.32 ns/lease
+             object-pool 0.6:   16.18 ns/lease
+              opool 0.2 Pool:   10.81 ns/lease
+         opool 0.2 LocalPool:    3.77 ns/lease
+       swimmer 0.3 (+resize):  215.07 ns/lease
+    lockfree-object-pool 0.1:   10.35 ns/lease
+              name: ns/lease:   (≈ cycles at 5.7 GHz)
+                       fresh:  241.21 ns  ≈ 1375 cycles
+                     hoisted:    2.24 ns  ≈   13 cycles
+                     raw TLS:    7.34 ns  ≈   42 cycles
+                  ours local:   10.26 ns  ≈   58 cycles
+                 ours shared:   23.39 ns  ≈  133 cycles
+           ours shared owned:   30.32 ns  ≈  173 cycles
+                 object-pool:   16.18 ns  ≈   92 cycles
+                  opool Pool:   10.81 ns  ≈   62 cycles
+             opool LocalPool:    3.77 ns  ≈   21 cycles
+                     swimmer:  215.07 ns  ≈ 1226 cycles
+                    lockfree:   10.35 ns  ≈   59 cycles
+
+=== P1: rayon, 1000000 tiny tasks, 1 KiB Vec<u8>, near-zero work ===
+          fresh vec![0u8; N]:     1.4 ms  (   1.4 ns/task)
+      rayon map_init (floor):     0.3 ms  (   0.3 ns/task)
+        ours ThreadLocalPool:     0.8 ms  (   0.8 ns/task)
+             ours BufferPool:     1.0 ms  (   1.0 ns/task)
+             object-pool 0.6:  1551.4 ms  (1551.4 ns/task)
+              opool 0.2 Pool:   254.1 ms  ( 254.1 ns/task)
+       swimmer 0.3 (+resize):     1.1 ms  (   1.1 ns/task)
+    lockfree-object-pool 0.1:    43.0 ms  (  43.0 ns/task)
+  ns/task over the map_init floor:
+                       fresh: +1.2
+                  ours local: +0.6
+                 ours shared: +0.7
+                 object-pool: +1551.1
+                  opool Pool: +253.8
+                     swimmer: +0.8
+                    lockfree: +42.8
+
+=== P2: rayon, 200000 tasks of ~µs work each, 64 KiB Vec<u8>, full per-task pass ===
+          fresh vec![0u8; N]:     9.2 ms  (  46.2 ns/task)
+      rayon map_init (floor):     6.2 ms  (  31.0 ns/task)
+        ours ThreadLocalPool:     5.9 ms  (  29.5 ns/task)
+             ours BufferPool:     5.9 ms  (  29.5 ns/task)
+             object-pool 0.6:   378.6 ms  (1893.1 ns/task)
+              opool 0.2 Pool:    52.2 ms  ( 260.8 ns/task)
+       swimmer 0.3 (+resize):     9.1 ms  (  45.6 ns/task)
+    lockfree-object-pool 0.1:    16.1 ms  (  80.7 ns/task)
+  ns/task over the map_init floor:
+                       fresh: +15.2
+                  ours local: +-1.4
+                 ours shared: +-1.5
+                 object-pool: +1862.2
+                  opool Pool: +229.8
+                     swimmer: +14.6
+                    lockfree: +49.7
+
+=== P2: rayon, 16384 tasks of ~100s of µs work each, 2048 KiB Vec<u8>, full per-task pass ===
+          fresh vec![0u8; N]:    51.3 ms  (3133.7 ns/task)
+      rayon map_init (floor):    35.9 ms  (2192.3 ns/task)
+        ours ThreadLocalPool:    24.5 ms  (1496.7 ns/task)
+             ours BufferPool:    24.9 ms  (1522.1 ns/task)
+             object-pool 0.6:    30.1 ms  (1835.6 ns/task)
+              opool 0.2 Pool:   357.8 ms  (21838.2 ns/task)
+       swimmer 0.3 (+resize):    54.0 ms  (3295.7 ns/task)
+    lockfree-object-pool 0.1:    31.0 ms  (1892.8 ns/task)
+  ns/task over the map_init floor:
+                       fresh: +941.5
+                  ours local: +-695.6
+                 ours shared: +-670.2
+                 object-pool: +-356.7
+                  opool Pool: +19645.9
+                     swimmer: +1103.4
+                    lockfree: +-299.5
+
+=== T: std::thread::scope, 32 threads x 1000000 leases, 1 KiB Vec<u8>, near-zero work ===
+          fresh vec![0u8; N]:    47.4 ms  (   1.5 ns/task)
+           raw thread_local!:     9.5 ms  (   0.3 ns/task)
+        ours ThreadLocalPool:    27.7 ms  (   0.9 ns/task)
+             ours BufferPool:    31.3 ms  (   1.0 ns/task)
+             object-pool 0.6: 48427.5 ms  (1513.4 ns/task)
+              opool 0.2 Pool:  8149.2 ms  ( 254.7 ns/task)
+       swimmer 0.3 (+resize):    33.2 ms  (   1.0 ns/task)
+    lockfree-object-pool 0.1:  1380.1 ms  (  43.1 ns/task)
+  ns/task vs raw thread_local! floor:
+                       fresh: +1.2
+                  ours local: +0.6
+                 ours shared: +0.7
+                 object-pool: +1513.1
+                  opool Pool: +254.4
+                     swimmer: +0.7
+                    lockfree: +42.8

@@ -9,6 +9,10 @@ readme = "README.md"
 repository = "https://github.com/ajz34/par-buffer-pool"
 keywords = ["pool", "buffer", "scratch", "rayon", "reuse"]
 categories = ["concurrency", "memory-management", "rust-patterns"]
+# `bench-compare/` is the cross-crate benchmark harness backing the
+# `comparison` module's measured section — a separate crate, not part of
+# the published library.
+exclude = ["bench-compare"]
 # there are intentionally no runtime dependencies
 
 [features]
