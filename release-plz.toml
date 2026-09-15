@@ -1,0 +1,20 @@
+# release-plz configuration: https://release-plz.dev/docs/config
+# Consumed by the release-plz jobs in .github/workflows/release-plz.yml.
+#
+# Changelog style matches this account's house style (e.g. RESTGroup/rstsr):
+# one section per release titled `## vX.Y.Z -- YYYY-MM-DD`, with commit
+# subjects as plain bullets. This repository does not use conventional
+# commits ("feat:", "fix:", ...), so the default git-cliff grouping would
+# dump every commit into a bare "Other" section; instead the template lists
+# commits flat, taking only the first line of each message (the bodies live
+# in git history).
+[changelog]
+header = """# Changelog
+"""
+body = """
+## v{{ version }} -- {{ timestamp | date(format="%Y-%m-%d") }}
+
+{% for commit in commits %}\
+- {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | split(pat="\\n") | first | trim }}
+{% endfor %}\
+"""

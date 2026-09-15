@@ -1,0 +1,85 @@
+# Release automation via release-plz (https://release-plz.dev):
+#
+# - `release-plz release`: publishes the crate to crates.io when the version
+#   in `Cargo.toml` has no git tag yet, then creates the tag and a GitHub
+#   release with the matching CHANGELOG.md section.
+# - `release-plz release-pr`: opens/updates a PR that bumps the version and
+#   appends the next CHANGELOG.md section, prepared from commit history.
+#
+# One-time setup:
+# 1. Repository settings → Actions → General → Workflow permissions: allow
+#    "GitHub Actions to create and approve pull requests".
+# 2. Add a crates.io token (scopes `publish-new` and `publish-update`) as the
+#    `CARGO_REGISTRY_TOKEN` repository secret. crates.io cannot use trusted
+#    publishing for a crate's *first* publish, so `par-buffer-pool` v0.1.0
+#    can alternatively be published by hand once; afterwards the secret only
+#    needs the `publish-update` scope.
+# 3. docs.rs builds the published version automatically; no action needed.
+
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # Release unpublished packages (tag on main is missing for Cargo.toml's
+  # version). Runs first so that the "next release" PR is prepared against
+  # the just-published state.
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the release tag and GitHub release.
+      contents: write
+      pull-requests: read
+    steps:
+      # Full history: release-plz reads commits since the last release.
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Create/update the PR that bumps the version and writes the next
+  # CHANGELOG.md section. Remove this job to manage versions and the
+  # changelog by hand.
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    permissions:
+      # Push to the pull request branch.
+      contents: write
+      # Create and update pull requests.
+      pull-requests: write
+    # Serialize release-pr runs on the same branch; pending jobs wait instead
+    # of being cancelled, so a PR update is never skipped. (Not used for the
+    # release job: its cancellation semantics could skip a release.)
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only needed for a private registry; harmless here.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
