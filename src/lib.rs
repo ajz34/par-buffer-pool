@@ -4,8 +4,8 @@
 //! pools** with **RAII guards**, for reusing scratch buffers across parallel
 //! workers (rayon, scoped threads, ...):
 //!
-//! - [`BufferPool`] — one shared, mutex-guarded pile; any thread can satisfy
-//!   any lease. ([`SharedPooled`] guard, `prelude`.)
+//! - [`BufferPool`] — one shared, sharded pile; any thread can satisfy any
+//!   lease. ([`SharedPooled`] guard, `prelude`.)
 //! - [`ThreadLocalPool`] — one slot per worker thread; leases touch no lock
 //!   and no shared cache line. ([`LocalPooled`] guard.)
 //! - **Initializers that borrow.** [`BufferPool`]'s initializer — and its
@@ -86,8 +86,8 @@
 //!
 //! | | [`BufferPool`] | [`ThreadLocalPool`] |
 //! |---|---|---|
-//! | Storage | one shared `Mutex<Vec<T>>` | one slot per worker thread (`thread_local!`) |
-//! | Lease cost | mutex lock/unlock pair (~26 ns, contended under many tiny tasks) | TLS access, no lock (~9 ns, never contended) |
+//! | Storage | sharded `Mutex<Vec<T>>` (parallelism-scaled, ≥ 128) + a communal reserve pile | one slot per worker thread (`thread_local!`) |
+//! | Lease cost | lock on this thread's shard (~21 ns uncontended, no refcount — `get` borrows the pool) | TLS access, no lock (~9 ns, never contended) |
 //! | Initializer | may borrow non-`'static` data (`BufferPool<'a, T>`) | must be `'static` |
 //! | Buffers per pool | ≈ peak concurrent leases | ≈ worker threads, even if only two are ever busy |
 //! | Buffer movement | returns to the shared pile from any thread | parks on the thread that drops the guard; migrates if that is not where it was leased |
@@ -109,9 +109,13 @@
 //!   recycled on another? [`BufferPool`]. Want each worker to keep its own scratch
 //!   forever with zero shared state? [`ThreadLocalPool`].
 //! - Many tasks in the single-digit µs range at many workers: prefer
-//!   [`ThreadLocalPool`] — a shared mutex hit by millions of lease-pairs per
-//!   second falls into futex-convoy territory and can end up *slower than
-//!   not pooling at all* (see `local_static_bench` in the examples).
+//!   [`ThreadLocalPool`]. [`BufferPool`] leases no longer convoy (sharded
+//!   locks, and `get` borrows the pool instead of taking a reference
+//!   count), so at 32 workers it tracks fresh allocation rather than
+//!   falling hundreds of ns/task behind — but each lease still locks and
+//!   unlocks its shard where the TLS pool only touches thread-local
+//!   storage, so the lock-free pool stays the top choice when tasks are
+//!   tiny and numerous (see `local_static_bench` in the examples).
 //! - Mixed workloads can simply use both: they are independent types over
 //!   the same guard pattern.
 //!
@@ -120,7 +124,8 @@
 //! | Item | What it does |
 //! |---|---|
 //! | [`new`](BufferPool::new) | Build a pool; `init` runs lazily, only when a lease finds the slot/pile empty (unless `prefill` was called). |
-//! | [`get`](BufferPool::get) | Lease a buffer as a guard ([`SharedPooled`] / [`LocalPooled`], [`std::ops::Deref`] / [`std::ops::DerefMut`] to `T`). |
+//! | [`get`](BufferPool::get) | Lease a buffer as a guard ([`SharedPooled`] / [`LocalPooled`], [`std::ops::Deref`] / [`std::ops::DerefMut`] to `T`). Refcount-free: the guard borrows the pool handle. |
+//! | [`get_owned`](BufferPool::get_owned) | (`BufferPool` only) The same lease behind an *owning* guard ([`SharedPooledOwned`]) that keeps the pool alive after every handle is dropped — costs one `Arc` reference-count pair per lease. |
 //! | guard drop | Return the buffer — on scope exit, early return, or panic unwind. |
 //! | [`with`](BufferPool::with) | Closure-based checkout of the same mechanism. |
 //! | `into_inner` | Detach the buffer when it *is* the result (not recycled). |
@@ -136,9 +141,9 @@
 //! every task should skip it.
 //!
 //! `BufferPool<'a, T>` is `Send + Sync` whenever `T: Send`; [`SharedPooled`]
-//! is `Send` under the same condition, so leases may even migrate between
-//! threads. [`ThreadLocalPool`] is always `Send + Sync`; its guard is `Send`
-//! when `T: Send`.
+//! and [`SharedPooledOwned`] are `Send` under the same condition, so leases
+//! may even migrate between threads. [`ThreadLocalPool`] is always `Send +
+//! Sync`; its guard is `Send` when `T: Send`.
 //!
 //! ## Examples
 //!
@@ -337,16 +342,34 @@
 //!
 //! ## Design notes
 //!
-//! - **`BufferPool` locking.** One [`std::sync::Mutex`] guards a `Vec<T>`;
-//!   the critical section is a `pop`/`push` (tens of nanoseconds) while
-//!   lease holders do microseconds-to-milliseconds of work, so contention
-//!   is negligible next to the allocation it removes — unless tasks are
-//!   tiny and workers numerous, which is [`ThreadLocalPool`]'s territory.
-//!   Allocation of new buffers happens *outside* the lock. And even
-//!   uncontended, a recycled shared-pool buffer tends to pay a cross-core
-//!   cache-line transfer on its next use — a second point for
-//!   [`ThreadLocalPool`] under heavy small-buffer churn.
-//! - **`BufferPool` poisoning.** The lock is only ever held for a
+//! - **`BufferPool` sharding.** Idle buffers park in
+//!   [`std::sync::Mutex`]`<Vec<T>>` shards — the machine's parallelism
+//!   rounded up to a power of two, never fewer than 128 (roughly the
+//!   largest thread count in one NUMA domain on current top-end AMD
+//!   servers) — indexed by the
+//!   parking thread's dense id, plus one communal reserve pile stocked by
+//!   [`prefill`](BufferPool::prefill) and consulted when a lease finds its
+//!   shard empty (returns never refill the reserve, so it cannot become a
+//!   shared bottleneck). A lease locks its own thread's shard — with one
+//!   shard per worker, that lock is effectively thread-private, which is
+//!   what removes the futex convoy a one-pile pool suffers at high worker
+//!   counts. The initializer still runs outside every lock. `get`'s guard
+//!   *borrows* the pool handle, so a lease takes no reference count — the
+//!   remaining per-lease cost over [`ThreadLocalPool`] is the shard's
+//!   lock/unlock pair itself. The rare guard that must outlive every pool
+//!   handle opts into an `Arc` reference-count pair per lease via
+//!   [`get_owned`](BufferPool::get_owned) ([`SharedPooledOwned`]). Cold-start
+//!   sharing is deliberately weaker than a one-pile
+//!   pool's: a lease whose shard and the reserve are both empty initializes
+//!   fresh even if another thread's shard holds idle buffers, so the buffer
+//!   count converges to the sum of per-shard peaks rather than the global
+//!   peak (still capped exactly by
+//!   [`with_max_idle`](BufferPool::with_max_idle), whose count is only
+//!   maintained when a cap is set). A thread that exits leaves its parked
+//!   buffers in its shard until a [`drain`](BufferPool::drain) or the pool's
+//!   drop reclaims them — bounded by that same cap, and the same class of
+//!   reclamation lag [`ThreadLocalPool`] documents.
+//! - **`BufferPool` poisoning.** Each pile's lock is only ever held for a
 //!   `pop`/`push`, so a poisoned mutex carries no damaged invariant; it is
 //!   recovered from with [`std::sync::PoisonError::into_inner`] rather than
 //!   panicking or leaking idle buffers.
@@ -368,9 +391,13 @@
 //!   `Vec`-like buffers).
 //! - **Clone handles.** Both pools are cheap handles around shared state
 //!   (like `Arc`): clone them into worker closures or store them in a
-//!   driver struct. `SharedPooled` guards keep their pool alive even if all
-//!   handles are dropped; `LocalPooled` guards borrow the pool instead,
-//!   which is what keeps their lease path free of reference counts.
+//!   driver struct. Both pools' `get` guards borrow the handle — the lease
+//!   path is refcount-free on both; `BufferPool` additionally offers
+//!   `get_owned` for the guard that must outlive all handles (it keeps the
+//!   pool alive, paying one reference-count pair per lease), while
+//!   `LocalPooled` has no owning variant: a thread-local slot's reclamation
+//!   is tied to the pool's drop protocol, so a guard cannot extend the
+//!   pool's life.
 //! - **No `unsafe`.** Neither pool uses `MaybeUninit`, pinning, or raw
 //!   pointers; guards are plain owned values.
 //!
@@ -396,7 +423,7 @@
 mod buffer;
 mod local;
 
-pub use crate::buffer::{BufferPool, PoolStats, SharedPooled};
+pub use crate::buffer::{BufferPool, PoolStats, SharedPooled, SharedPooledOwned};
 pub use crate::local::{LocalPooled, ThreadLocalPool};
 
 /// Comparison documentation, written against the crates.io landscape.
@@ -410,10 +437,10 @@ pub mod comparison {}
 ///
 /// let shared = BufferPool::new(Vec::<u8>::new);
 /// let local = ThreadLocalPool::new(Vec::<u8>::new);
-/// let _a: SharedPooled<'_, Vec<u8>> = shared.get();
+/// let _a: SharedPooled<'_, '_, Vec<u8>> = shared.get();
 /// let _b: LocalPooled<'_, Vec<u8>> = local.get();
 /// ```
 pub mod prelude {
-    pub use crate::buffer::{BufferPool, PoolStats, SharedPooled};
+    pub use crate::buffer::{BufferPool, PoolStats, SharedPooled, SharedPooledOwned};
     pub use crate::local::{LocalPooled, ThreadLocalPool};
 }

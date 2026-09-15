@@ -277,10 +277,14 @@ impl<T: Send + 'static> ThreadLocalPool<T> {
     /// parks on *whichever thread's* slot the guard is dropped on, so keep
     /// the guard bound in the task closure that uses it.
     ///
-    /// The guard borrows the pool (`LocalPooled<'_, T>`): unlike
-    /// [`SharedPooled`](crate::SharedPooled) it does not keep the pool alive,
-    /// which is what lets a lease avoid touching any reference count. Keep
-    /// the handle alive for the guard's scope (it nearly always is).
+    /// The guard borrows the pool (`LocalPooled<'_, T>`) — same refcount-free
+    /// lease as [`SharedPooled`](crate::SharedPooled)'s borrow of its
+    /// [`BufferPool`](crate::BufferPool); the difference is that
+    /// [`BufferPool`](crate::BufferPool) also offers an owning
+    /// [`get_owned`](crate::BufferPool::get_owned), while a thread-local slot
+    /// cannot keep a pool alive on a guard: the slot's reclamation is tied to
+    /// the pool's drop protocol. Keep the handle alive for the guard's scope
+    /// (it nearly always is).
     ///
     /// # Example
     ///
@@ -479,9 +483,10 @@ impl<T> fmt::Debug for ThreadLocalPool<T> {
 ///
 /// The guard is `Send` whenever `T: Send` (the pool handle it borrows is
 /// `Sync`), so it may be moved across threads mid-lease — the buffer then
-/// parks on the thread that drops it. Unlike
-/// [`SharedPooled`](crate::SharedPooled), the guard borrows the pool instead
-/// of keeping it alive; the borrow is what keeps the hot path free of atomics.
+/// parks on the thread that drops it. Like
+/// [`SharedPooled`](crate::SharedPooled), the guard borrows the pool rather
+/// than owning a handle: the borrow is what keeps the hot path free of
+/// atomics.
 ///
 /// # Example
 ///

@@ -29,7 +29,7 @@ them back.
 
 | Crate | Shared pool | Thread-local pool | Guarded checkout | Reset on return | Borrowing (`'a`) init | Idle cap | Prefill | Runtime deps | Last release / status |
 |---|---|---|---|---|---|---|---|---|---|
-| **this crate** | ✓ mutex pile | ✓ `ThreadLocalPool` | ✓ `Deref` guards, `into_inner`, `put` | ✓ closure hook | ✓ `'a`-bounded closure | ✓ `with_max_idle` | ✓ `BufferPool::prefill` | **zero**, `#![forbid(unsafe_code)]` | this release |
+| **this crate** | ✓ sharded mutex pile | ✓ `ThreadLocalPool` | ✓ `Deref` guards, `into_inner`, `put` | ✓ closure hook | ✓ `'a`-bounded closure | ✓ `with_max_idle` | ✓ `BufferPool::prefill` | **zero**, `#![forbid(unsafe_code)]` | this release |
 | [object-pool] 0.6.0 | ✓ (`Arc`-shared) | ✗ | ✓ `Reusable`, owned variant, `detach`/`attach` | **✗** (docs warn objects are "returned but NOT reset") | ✗ no lifetime parameter | ✓ cap at construction, `try_pull` saturates | ✗ | `parking_lot` | 2024-08, slow-moving |
 | [opool] 0.2.0 | ✓ lock-free (`ArrayQueue`) | ✓ `LocalPool` | ✓ `RefGuard`/`RcGuard`, owned variants | ✓ via `PoolAllocator::reset` (+ `is_valid` rejection) | ✗ allocator trait, no lifetime parameter | ✓ `pool_size` caps what is stored | ✓ `new_prefilled` | `crossbeam-queue`; `no_std` + alloc | 2025-12, active |
 | [buffer-pool (quiche)] 0.2.1 | ✓ sharded | sharded (not exposed per-thread) | ✓ `Pooled` guard | ✓ `Reuse` trait, may reject the return | n/d (thin docs) | n/d | n/d | `crossbeam` + `foundations` | 2026-02, active inside quiche |
@@ -147,8 +147,9 @@ Honesty requires the reverse list:
 - **`no_std` support.** opool works on `no_std` + alloc; this crate is
   `std`-only (`std::sync::Mutex`, `thread_local!`).
 - **`Rc`-flavored guards** for single-threaded pools (opool, lifeguard).
-  Mostly moot here: [`SharedPooled`](crate::SharedPooled) already owns an
-  `Arc` handle, and a non-`Send` `T` works with `BufferPool` single-threaded.
+  Mostly moot here: `get`'s lease path already takes no reference count
+  (the guard borrows the pool), and a non-`Send` `T` works with
+  `BufferPool` single-threaded.
 - **Allocator-trait configuration** (opool) instead of closures — a style
   difference that buys `no_std` and per-object `is_valid`, at the cost of
   more ceremony for the 95% case.

@@ -16,10 +16,15 @@
 //!
 //! Run with `cargo run --release --example size_buckets`.
 
-use par_buffer_pool::{BufferPool, SharedPooled};
+use par_buffer_pool::{BufferPool, SharedPooledOwned};
 use rayon::prelude::*;
 
-type Lease = SharedPooled<'static, Vec<f64>>;
+// The owning guard: these leases are produced from `&self` behind a
+// `dyn Fn` and sent into rayon workers, so they must outlive any borrow of
+// the scratch struct. `get_owned` pays one reference-count pair per lease
+// for that freedom; leases scoped inside the task closure would use plain
+// `get` instead.
+type Lease = SharedPooledOwned<'static, Vec<f64>>;
 
 /// One grow-only pool serving any requested length.
 struct AnySizeScratch {
@@ -38,7 +43,7 @@ impl AnySizeScratch {
     /// Lease a zeroed buffer of exactly `n` elements; capacity is recycled
     /// across leases of any size, so only growth ever allocates.
     fn get(&self, n: usize) -> Lease {
-        let mut buf = self.pool.get();
+        let mut buf = self.pool.get_owned();
         buf.clear();
         buf.resize(n, 0.0); // allocation-free whenever capacity >= n
         buf
@@ -66,7 +71,7 @@ impl ClassScratch {
 
     fn get(&self, n: usize) -> Lease {
         let class = n.max(1).next_power_of_two().trailing_zeros() as usize;
-        let mut buf = self.pools[class - 4].get();
+        let mut buf = self.pools[class - 4].get_owned();
         buf.clear();
         buf.resize(n, 0.0);
         buf
