@@ -17,8 +17,10 @@
 //!
 //! Two honest caveats, visible if you shrink `N` to cache-sized buffers:
 //!
-//!   * the lease/return lock pair is ~100 ns — it only matters for tasks in
-//!     the low microseconds (then prefer `map_init`, or coarsen tasks);
+//!   * the lease/return round trip is ≈ 140 CPU cycles (≈ 25 ns, measured
+//!     on the Ryzen 9 9950X3D documented in `local_static_bench`) — it only
+//!     matters for tasks in the low microseconds (then prefer `map_init`,
+//!     or coarsen tasks);
 //!   * a *recycled* buffer's cache lines live on the previous owner's core,
 //!     so tiny hot-in-L2 buffers pay a cross-core transfer that a freshly
 //!     zeroed buffer does not.

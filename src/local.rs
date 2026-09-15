@@ -4,7 +4,8 @@
 //! Buffers live in thread-local storage — one lazily created slot per worker
 //! thread per pool — so a lease never touches a lock or a shared cache line.
 //! This is the structured answer to hand-rolled `thread_local!` +
-//! `RefCell` scratch: the same ~ns access cost, plus the guard-based RAII
+//! `RefCell` scratch: the same few-dozen-cycle access cost, plus the
+//! guard-based RAII
 //! return, reset hooks, detach, and stats that raw TLS cannot give you.
 //! Compared to [`BufferPool`](crate::BufferPool) (see the crate-level
 //! [choosing guide](crate#which-pool)):
@@ -155,10 +156,13 @@ fn slot_for<'s>(reg: &'s mut Registry, id: usize, live: &Arc<AtomicBool>) -> &'s
 ///
 /// Each worker thread lazily gets its own buffer slot; a lease on a thread
 /// that already returned its buffer recycles it with no synchronization at
-/// all — no lock, no shared cache line. Under the same workloads that drive
-/// `BufferPool`'s shared mutex into futex-convoy territory (many tiny tasks
-/// at high worker counts), `ThreadLocalPool` keeps scaling linearly. See the
-/// crate-level [choosing guide](crate#which-pool) for when to prefer which.
+/// all — no lock, no shared cache line. `BufferPool`'s per-worker shard
+/// lock is effectively thread-private at any realistic worker count, but it
+/// is still a lock taken on every lease; this pool never takes one, which
+/// is why it keeps the cheaper lease (≈ 50 vs ≈ 130 CPU cycles
+/// uncontended). See the crate-level [choosing guide](crate#which-pool)
+/// and the [comparison](crate::comparison) measurements for when to prefer
+/// which.
 ///
 /// The handle is [`Clone`] + [`Send`] + [`Sync`], so it is shared with rayon
 /// or scoped threads by reference, exactly like `BufferPool`. The

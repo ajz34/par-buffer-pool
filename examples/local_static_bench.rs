@@ -8,7 +8,7 @@
 //! strategy   | per-task lease/return mechanism
 //! -----------+-------------------------------------------------------------
 //! fresh      | malloc + zero-fill (no pool)
-//! pooled     | BufferPool: shared-mutex lock/unlock pair + Vec push/pop
+//! pooled     | BufferPool: per-thread shard lock/unlock + Vec push/pop
 //! local      | ThreadLocalPool::get: TLS access + Option take/put (no lock)
 //! local_with | ThreadLocalPool::with: the same path, closure-shaped
 //! hoisted    | plain stack local reused across the loop (the floor)
@@ -18,10 +18,10 @@
 //! Two regimes are measured:
 //!
 //!   * *lease cost* — single-threaded, near-zero work per lease, several
-//!     buffer sizes: isolates the mechanism numbers above as ns/lease.
-//!   * *parallel* — rayon with real per-task work: 64 KiB tasks (lock
-//!     contention and cross-core buffer reuse are visible) and 2 MiB tasks
-//!     (allocation-dominated; every reuse strategy wins by the same margin).
+//!     buffer sizes: isolates the mechanisms above, one lease at a time.
+//!   * *parallel* — rayon with real per-task work: 64 KiB tasks (recycled
+//!     buffers' cross-core cache lines are visible) and 2 MiB tasks
+//!     (allocation-dominated; every reuse strategy ties).
 //!
 //! Honest caveats:
 //!
@@ -31,21 +31,29 @@
 //!     to that thread's slot; a shared pool instead returns it to any
 //!     thread's next lease.
 //!   * The shared pool hands out *recycled* buffers whose cache lines may
-//!     live on another core. With tiny hot buffers that — plus the shared
-//!     mutex — is the real cost being measured; for big buffers it vanishes
-//!     into noise.
+//!     live on another core. With tiny hot buffers that — plus the shard
+//!     lock round trip — is the real cost being measured; for big buffers
+//!     it vanishes into noise.
 //!   * This example builds with the `stats` feature on (the crate's
 //!     dev-dependency enables it for examples/tests), which adds one
-//!     relaxed add on a shared cache line per lease to *both* pools. For
-//!     default-feature numbers, copy this file into a crate that depends on
-//!     `par-buffer-pool` without the feature. Reference numbers measured on
-//!     the author's machine (16-core Ryzen 9 9955HX, glibc):
-//!     lease cost — pooled ≈ 26 ns (30 with `stats`), local ≈ 9 ns (10
-//!     with `stats`), hoisted floor ≈ 2.5 ns, fresh 16-305 ns by size;
-//!     parallel ~4.5 µs tasks at 16 workers — fresh 14.8 / local 14.1 /
-//!     map_init 14.1 / pooled 25.9 ms (stats off): the pooled 2x is the
-//!     shared mutex's futex convoy, and it disappears with fewer threads
-//!     or with tasks ≳ 10 µs.
+//!     relaxed add on a shared cache line per lease to *both* pools — about
+//!     one cycle, already included below. For default-feature numbers, copy
+//!     this file into a crate that depends on `par-buffer-pool` without the
+//!     feature. Reference numbers, measured on an AMD Ryzen 9 9950X3D
+//!     (16 cores / 32 hardware threads, Linux, glibc, rustc 1.97) at 16
+//!     rayon workers (`RAYON_NUM_THREADS=16`), in CPU cycles at that chip's
+//!     ≈ 5.7 GHz boost — re-measure on your hardware before trusting
+//!     orderings: lease cost — pooled ≈ 140 cycles, local ≈ 60-75, hoisted
+//!     floor ≈ 13, fresh ≈ 110 cycles at 1 KiB rising to ≈ 1500-2000 at
+//!     64 KiB. Parallel, 64 KiB tasks at 16 workers: the strategies tie —
+//!     fresh 14.2 / pooled 13.2 / local 13.7 / map_init 13.4 ms for 50k
+//!     tasks (best of 5; run-to-run spread a few percent). Real per-task
+//!     work hides the shard lock: a one-pile pool convoys on its single
+//!     mutex at this shape and loses 2x, the sharded one tracks fresh
+//!     allocation. A lease still takes a lock where the TLS pool touches
+//!     only thread-local storage — the single-thread gap above, worth a few
+//!     ns/task over the `map_init` floor on tiny tasks at high worker
+//!     counts.
 //!
 //! Run with `cargo run --release --example local_static_bench`.
 
@@ -109,7 +117,7 @@ fn lease_cost(n: usize, iters: usize) {
     let pooled = best_of(|| {
         let mut acc = 0.0;
         for task in 0..iters {
-            let mut buf = pool.get(); // lock/pop, then lock/push on drop
+            let mut buf = pool.get(); // shard lock/pop, then lock/push on drop
             acc += black_box(touch(&mut buf, task));
         }
         acc
@@ -244,8 +252,9 @@ fn main() {
     lease_cost(1024, 50_000); // 8 KiB
     lease_cost(8192, 6_000); // 64 KiB
 
-    // Tiny parallel tasks: ~µs of work each, so per-task lease overhead and
-    // lock contention across 16 workers matter.
+    // Tiny parallel tasks: ~µs of work each — small enough that per-lease
+    // lock traffic across 16 workers would show if it contended (the shard
+    // locks are per-thread, and below the strategies tie).
     parallel(8192, 50_000, 1);
     // Huge parallel tasks: allocation dominates; all reuse strategies tie.
     parallel(262_144, 512, 2);

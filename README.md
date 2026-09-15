@@ -89,7 +89,7 @@ else is a feature choice.**
 | | [`BufferPool`] | [`ThreadLocalPool`] |
 |---|---|---|
 | Storage | one shared `Mutex<Vec<T>>` | one slot per worker thread (`thread_local!`) |
-| Lease cost | mutex pair ≈ 26 ns, contended under many tiny tasks | TLS access ≈ 9 ns, never contended |
+| Lease cost | per-worker shard lock, ≈ 100+ CPU cycles uncontended; no convoy at high worker counts (≈ +1 ns/task over rayon's floor at 32 workers) | TLS access, ≈ 50 CPU cycles, never contended |
 | Initializer | may borrow non-`'static` data (`BufferPool<'a, T>`) | must be `'static` |
 | Buffers per pool | ≈ peak concurrent leases | ≈ worker threads, even if only two are busy |
 | Buffer movement | returns to the shared pile from any thread | parks on the thread that drops the guard; migrates if that is not where it was leased |
@@ -98,9 +98,14 @@ else is a feature choice.**
 | `idle_len` | global parked count | this thread's parked count (0 or 1) |
 | `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | none: other threads' slots are unreachable (pool drop / thread exit reclaims) |
 
-(Lease costs measured on a 16-core desktop CPU with glibc, default features;
-see `examples/local_static_bench.rs` for the full matrix and the caveat that
-orderings should be re-measured on target hardware.)
+(Cycle figures are approximate, derived by dividing the measured nanosecond
+costs by the test machine's ~5.7 GHz clock — lease cost is machine-specific,
+so the ns-level numbers are not quoted here. The measured machine, all
+benchmark conditions, and the full cross-crate matrix live in the
+[benchmark section of the comparison doc](src/comparison.md), produced by
+the harness in [`bench-compare/`](bench-compare) (with its logged run in
+`bench-compare/output.txt`); `examples/local_static_bench.rs` re-measures
+the two pools on your hardware.)
 
 ## Semantics
 

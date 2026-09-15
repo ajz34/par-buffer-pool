@@ -87,7 +87,7 @@
 //! | | [`BufferPool`] | [`ThreadLocalPool`] |
 //! |---|---|---|
 //! | Storage | sharded `Mutex<Vec<T>>` (parallelism-scaled, ≥ 128) + a communal reserve pile | one slot per worker thread (`thread_local!`) |
-//! | Lease cost | lock on this thread's shard (~21 ns uncontended, no refcount — `get` borrows the pool) | TLS access, no lock (~9 ns, never contended) |
+//! | Lease cost | lock on this thread's shard (≈ 100+ CPU cycles uncontended, no refcount — `get` borrows the pool) | TLS access, no lock (≈ 50 CPU cycles, never contended) |
 //! | Initializer | may borrow non-`'static` data (`BufferPool<'a, T>`) | must be `'static` |
 //! | Buffers per pool | ≈ peak concurrent leases | ≈ worker threads, even if only two are ever busy |
 //! | Buffer movement | returns to the shared pile from any thread | parks on the thread that drops the guard; migrates if that is not where it was leased |
@@ -96,10 +96,13 @@
 //! | `idle_len` | global parked count | this thread's parked count (0 or 1) |
 //! | `drain` | the whole idle pile at once (call it between phases: leases still out are silently not included) | none: other threads' slots are unreachable (pool drop / thread exit reclaims) |
 //!
-//! (Lease costs measured on a 16-core desktop CPU with glibc, default
-//! features; see `local_static_bench` under [Examples](#examples) for the
-//! full matrix and the caveat that orderings should be re-measured on
-//! target hardware.)
+//! (Cycle figures are approximate, derived by dividing the measured
+//! nanosecond costs by the test machine's ~5.7 GHz clock — lease cost is
+//! machine-specific, so the ns-level numbers are not quoted here. The
+//! measured machine, all benchmark conditions, and the full cross-crate
+//! matrix live in the [comparison] module's benchmark section;
+//! `local_static_bench` under [Examples](#examples) re-measures the two
+//! pools on your hardware.)
 //!
 //! Practical guidance:
 //!
@@ -111,11 +114,13 @@
 //! - Many tasks in the single-digit µs range at many workers: prefer
 //!   [`ThreadLocalPool`]. [`BufferPool`] leases no longer convoy (sharded
 //!   locks, and `get` borrows the pool instead of taking a reference
-//!   count), so at 32 workers it tracks fresh allocation rather than
-//!   falling hundreds of ns/task behind — but each lease still locks and
-//!   unlocks its shard where the TLS pool only touches thread-local
-//!   storage, so the lock-free pool stays the top choice when tasks are
-//!   tiny and numerous (see `local_static_bench` in the examples).
+//!   count): measured at 32 rayon workers with tiny tasks, both pools sit
+//!   within a nanosecond per task of rayon's `map_init` floor, where every
+//!   single-pile pool crate pays hundreds. `ThreadLocalPool` still wins on
+//!   raw lease cost (≈ 50 vs ≈ 130 cycles uncontended) and touches no lock
+//!   at all, so it remains the top choice when tasks are tiny and numerous
+//!   (see the [comparison] measurements and `local_static_bench`
+//!   in the examples).
 //! - Mixed workloads can simply use both: they are independent types over
 //!   the same guard pattern.
 //!
@@ -328,7 +333,10 @@
 //! crates — object-pool, opool, Cloudflare's buffer-pool, swimmer,
 //! lifeguard, lockfree-object-pool, syncpool, and the adjacent arenas,
 //! `bytes`, and connection pools — with an honest table of what each offers,
-//! what none of them offer, and where this crate differs.
+//! what none of them offer, and where this crate differs, plus a measured
+//! lease-cost section whose machine, conditions, and harness (the
+//! repository's `bench-compare` directory) are stated alongside the
+//! results.
 //!
 //! ## Feature flags
 //!
