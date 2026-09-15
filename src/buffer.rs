@@ -550,7 +550,9 @@ impl<'a, T> BufferPool<'a, T> {
         // stays behind (that is the documented mid-phase caveat above).
         let mut drained = Vec::new();
         let mut taken = 0usize;
-        for shard in &self.inner.shards {
+        // `.iter()`, not `for .. in &self.inner.shards`: `&Box<[T]>` only
+        // became `IntoIterator` in rustc 1.80, past the crate's MSRV.
+        for shard in self.inner.shards.iter() {
             let pile = mem::take(&mut *lock_pile(&shard.0));
             taken += pile.len();
             drained.extend(pile);
